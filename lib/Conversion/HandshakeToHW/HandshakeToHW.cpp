@@ -30,6 +30,8 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 #include <optional>
+#include <iostream>
+#include <string>
 
 using namespace mlir;
 using namespace circt;
@@ -49,8 +51,9 @@ static Type tupleToStruct(TypeRange types) {
 struct HandshakeLoweringState {
   ModuleOp parentModule;
   NameUniquer nameUniquer;
+  bool addWakeSignals;
 };
-
+    
 // A type converter is needed to perform the in-flight materialization of "raw"
 // (non-ESI channel) types to their ESI channel correspondents. This comes into
 // effect when backedges exist in the input IR.
@@ -735,8 +738,8 @@ public:
     // builder.
     hw::HWModuleLike implModule = checkSubModuleOp(ls.parentModule, op);
     if (!implModule) {
+      
       auto portInfo = ModulePortInfo(getPortInfoForOp(op));
-
       submoduleBuilder.setInsertionPoint(op->getParentOp());
       implModule = submoduleBuilder.create<hw::HWModuleOp>(
           op.getLoc(), submoduleBuilder.getStringAttr(getSubModuleName(op)),
@@ -748,21 +751,414 @@ public:
               clk = ports.getInput("clock");
               rst = ports.getInput("reset");
             }
-
             BackedgeBuilder bb(b, op.getLoc());
             RTLBuilder s(ports.getPortList(), b, op.getLoc(), clk, rst);
             this->buildModule(op, bb, s, ports);
           });
-    }
 
+      if (ls.addWakeSignals) {
+	// find idle state
+	llvm::SmallVector<Operation*> traverseOrder;
+	llvm::SetVector<Operation*> ordered;
+	llvm::SmallVector<Operation*> stack;
+	for (auto &op : implModule.getBodyBlock()->getOperations()) {
+	  if (isa<esi::WrapValidReadyOp>(op) || isa<esi::UnwrapValidReadyOp>(op)) {
+	    ordered.insert(&op);
+	  }
+	  if (!ordered.contains(&op)) {
+	    stack.push_back(&op);
+	  }
+	  while (!stack.empty()) {
+	    auto peek = stack.back();
+	    bool pop = true;
+	    if (isa<esi::WrapValidReadyOp>(peek) || isa<esi::UnwrapValidReadyOp>(peek)) {
+	      stack.pop_back();
+	    } else {
+	      if (!isa<seq::CompRegOp>(peek)) {
+		for (auto operand : peek->getOperands()) {
+		  if (!isa<BlockArgument>(operand) && !ordered.contains(operand.getDefiningOp())) {
+		    stack.push_back(operand.getDefiningOp());
+		    pop = false;
+		  }
+		}
+	      } else {
+		if (!ordered.contains(peek->getOperand(3).getDefiningOp())) {
+		  stack.push_back(peek->getOperand(3).getDefiningOp());
+		  pop = false;
+		}
+	      }
+	      if (pop) {
+		traverseOrder.push_back(peek);
+		stack.pop_back();
+		ordered.insert(peek);
+	      }
+	    }
+	  }
+	}
+
+	llvm::SmallVector<llvm::DenseMap<Value, netValue>> history;
+	bool idleStateExists = false;
+	while (true) {
+	  llvm::DenseMap<Value, netValue> stateMap;
+	  for (auto wrapOp : implModule.getBodyBlock()->getOps<esi::WrapValidReadyOp>()) {
+	    stateMap[wrapOp->getResult(1)] = {false, APInt(1, 1)}; // ready
+	  }
+	  for (auto unwrapOp : implModule.getBodyBlock()->getOps<esi::UnwrapValidReadyOp>()) {
+	    stateMap[unwrapOp->getResult(0)] = {true, APInt(1,1)}; // data
+	    stateMap[unwrapOp->getResult(1)] = {false, APInt(1, 0)}; // valid
+	  }
+
+	  DenseMap<Value, netValue> prevStateMap;
+	  if (!history.empty()) {
+	    prevStateMap = history.back();
+	  }
+	  simulateOps(traverseOrder, stateMap, prevStateMap); 
+
+	  if (history.size() > 0) {
+	    if (history.back() == stateMap) {
+	      // self edge
+	      idleStateExists = true;
+	      break;
+	    } else if (std::find(history.begin(), history.end(), stateMap) != history.end()) {
+	      // cycle
+	      break;
+	    }
+	  }
+  	  history.push_back(stateMap);
+	}
+
+	llvm::DenseMap<Value, netValue> idleState;
+	for (auto op : implModule.getBodyBlock()->getOps<seq::CompRegOp>()) {
+	  idleState[op->getResult(0)] = history.back()[op->getResult(0)];
+	}
+
+	if (idleStateExists) {
+	  // partition circuit
+	  // get all outbound ready and valid signals (input ready and output valid)
+	  llvm::SmallVector<Value> trace;
+	  llvm::SetVector<Value> ctrl;
+	  llvm::SetVector<Value> out_val;
+	  llvm::SetVector<Value> in_rdy;
+	  for (auto i : implModule.getBodyBlock()->getArguments()) {
+	    if (isa<esi::ChannelType>(i.getType())) {
+	      auto user = i.getUsers().begin();
+	      auto ready = user->getOperands()[1];
+	      trace.push_back(ready);
+	      in_rdy.insert(ready);
+	    } 
+	  }
+	  for (auto i : implModule.getBodyBlock()->getTerminator()->getOperands()) {
+	    if (isa<esi::ChannelType>(i.getType())) {
+	      auto valid = i.getDefiningOp()->getOperands()[1];
+	      trace.push_back(valid);
+	      out_val.insert(valid);
+	    }
+	  }
+	
+	  while (!trace.empty()) {
+	    auto net = trace.back();
+	    trace.pop_back();
+	    if (!ctrl.contains(net)) {
+	      ctrl.insert(net);
+	      if (!isa<BlockArgument>(net) && !isa<esi::WrapValidReadyOp>(net.getDefiningOp()) && !isa<esi::UnwrapValidReadyOp>(net.getDefiningOp())) {
+		for (auto i : net.getDefiningOp()->getOperands()) {
+		  trace.push_back(i);
+		}
+	      }
+	    }
+	  }
+	  // sleepable ops are not wrap/unwrap and have an operand that isn't in control
+	  llvm::SetVector<Operation*> data_ops;
+	  for (auto &op : implModule.getBodyBlock()->getOperations()) {
+	    if (!isa<esi::WrapValidReadyOp>(op) && !isa<esi::UnwrapValidReadyOp>(op) && !isa<hw::OutputOp>(op)) {
+	      for (auto i : op.getOperands()) {
+		if (!ctrl.contains(i)) {
+		  data_ops.insert(&op);
+		  break;
+		}
+	      }
+	    }
+	  }
+	
+	  // inputs to sleepable are operands that aren't also sleepable
+	  // outputs from sleepable are results that aren't also sleepable
+	  llvm::SmallVector<Value> input_args;
+	  llvm::SetVector<Value> output_args;
+	  for (auto &op : data_ops) {
+	    for (auto i : op->getOperands()) {
+	      if (!data_ops.contains(i.getDefiningOp())) {
+		// operand not produced by sleepable op
+		input_args.push_back(i);
+	      }
+	    }
+	    for (auto res : op->getResults()) {
+	      for (auto use : res.getUsers()) {
+		if (!data_ops.contains(use)) {
+		  output_args.insert(res);
+		}
+	      }
+	    }
+	  }
+
+	
+	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
+	  auto portInfo = ModulePortInfo(getPortInfoForOp(implModule));
+	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
+	  std::map<int, Backedge> bmap;
+	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	  auto wake = bb.get(IntegerType::get(op->getContext(), 1));
+	  input_args.push_back(wake);
+
+	  SmallVector<hw::PortInfo> input_ports, output_ports;
+	  llvm::DenseMap<Value, int> arg_portId;
+	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
+	    if (idx == input_args.size()-1) {
+	      // last input arg is wake
+	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "wake"), arg.getType(), ModulePort::Direction::Input}, idx});
+	      break;
+	    }
+	    input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "in" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Input}, idx});
+	  }
+	  for (auto [idx, arg] : llvm::enumerate(output_args)) {
+	    output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "out" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Output}, idx});
+	    arg_portId[arg] = idx;
+	  }
+	  output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
+	
+	  // create sleepable module
+	  submoduleBuilder.setInsertionPoint(op->getParentOp());
+	  auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
+	    for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
+	      if (idx == ports.getPortList().sizeOutputs()-1) {
+		// last output is awake
+		// TODO: randomize wake time
+		ports.setOutput(port.name, ports.getInputs().back());
+		break;
+	      }
+	      auto backedge = bb.get(port.type);
+	      ports.setOutput(port.name, backedge);
+	      bmap[idx] = backedge;
+	    }
+	  });
+	
+	  // instantiate sleepable module
+	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	  auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
+		
+	  IRMapping valueMap;
+	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
+	    valueMap.map(arg, sleepModule.getBodyBlock()->getArguments()[idx]);
+	  }
+	  llvm::DenseMap<Value, Value> output_map;
+	  for (auto [idx, arg] : llvm::enumerate(output_args)) {
+	    output_map[arg] = sleepInstance->getResult(idx);
+	  }
+
+	  // clone data ops into sleepable module
+	  submoduleBuilder.setInsertionPoint(sleepModule.getBodyBlock()->getTerminator());
+	  for (auto &op : implModule.getBodyBlock()->getOperations()) {
+	    if (data_ops.contains(&op)) {
+	      auto newOp = submoduleBuilder.cloneWithoutRegions(op, valueMap);
+	      for (auto [idx, res] : llvm::enumerate(op.getResults())) {
+		if (output_args.contains(res)) {
+		  int backedge_idx = arg_portId[res];
+		  auto output_backedge = bmap[backedge_idx];
+		  auto newop_res = newOp->getResult(idx);
+		  output_backedge.setValue(newop_res);
+		}
+	      }
+	    }
+	  }
+
+	  // replace data op uses and erase
+	  for (auto res : output_args) {
+	    res.replaceAllUsesWith(output_map[res]);
+	    res.getDefiningOp()->erase();
+	  }
+
+	  // gate outputs with awake signal
+	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	  auto awake = sleepInstance->getResults().back();
+	  for (auto valid : out_val) {
+	    //auto validAndAwake = submoduleBuilder.create<comb::AndOp>(op->getLoc(), ValueRange({valid, awake}), false);
+	    auto validAndAwake = s.bAnd({valid, awake});
+	    valid.replaceUsesWithIf(validAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &valid) -> bool {
+	      return isa<esi::WrapValidReadyOp>(valid.getOwner()) || isa<esi::UnwrapValidReadyOp>(valid.getOwner());
+	    }));
+	  }	
+	  for (auto ready : in_rdy) {
+	    //auto readyAndAwake = submoduleBuilder.create<comb::AndOp>(op->getLoc(), ValueRange({ready, awake}), false);
+	    auto readyAndAwake = s.bAnd({ready, awake});
+	    ready.replaceUsesWithIf(readyAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &ready) -> bool {
+	      return isa<esi::WrapValidReadyOp>(ready.getOwner()) || isa<esi::UnwrapValidReadyOp>(ready.getOwner());
+	    }));
+	  }
+	
+	  // find idle state if needed and define wake signal
+	  Value outValidOp = s.bOr(ValueRange(out_val.getArrayRef()), "out_valid");
+ 	  auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
+	  if (regOps.empty()) {
+	    wake.setValue(outValidOp);
+	  } else {
+	    // find inputs that drive idle state
+	    llvm::SmallVector<Value> inputs;
+	    llvm::SmallVector<Value> stack;
+	    llvm::SetVector<Value> visited;
+    	    llvm::SmallVector<Value> idleStateOps;
+	    for (auto [key, val] : idleState) {
+	      if (!val.x) {
+		// don't worry about don't cares
+		stack.push_back(key.getDefiningOp()->getOperand(0));
+		stack.push_back(key.getDefiningOp()->getOperand(3));
+
+		auto idleValOp = s.constant(val.value);
+		auto idleCmpOp = s.cmp(key, idleValOp, comb::ICmpPredicate::eq);
+		idleStateOps.push_back(idleCmpOp);
+	      }
+	    }
+	    Value idleOp = s.bAnd(idleStateOps, "idle");
+	    Value notIdleOp = s.bNot(idleOp);
+	    
+	    while (!stack.empty()) {
+	      auto net = stack.back();
+	      stack.pop_back();
+	      visited.insert(net);
+		  
+	      if (isa<BlockArgument>(net)) {
+		inputs.push_back(net);
+	      } else {
+		auto op = net.getDefiningOp();
+		if (isa<esi::WrapValidReadyOp>(op) || isa<esi::UnwrapValidReadyOp>(op)) {
+		  // handshake inputs
+		  for (auto result : op->getResults()) {
+		    if (result == net) {
+		      inputs.push_back(result);
+		    }
+		  }
+		} else if (isa<seq::CompRegOp>(op)) {
+		  stack.push_back(op->getOperand(0));
+		  stack.push_back(op->getOperand(3));
+		} else {
+		  for (auto operand : op->getOperands()) {
+		    if (!visited.contains(operand)) {
+		      stack.push_back(operand);
+		    }
+		  }
+		}
+	      }
+	    }
+	    
+	    // for every combination of inputs, check if state changes from idle
+	    size_t num_bits = 0;
+	    for (auto i : inputs) {
+	      num_bits += i.getType().getIntOrFloatBitWidth();
+	    }
+
+	    llvm::SmallVector<std::string> bit_vectors;  
+	    bit_vectors.push_back("0");
+	    bit_vectors.push_back("1");
+	    for (size_t i = 0; i < num_bits-1; i++) {
+	      llvm::SmallVector<std::string> update;
+	      while (!bit_vectors.empty()) {
+	     	auto back = bit_vectors.back();
+	     	bit_vectors.pop_back();
+		auto zero = back + "0";
+	   	update.push_back(zero);
+		back = back + "1";
+		update.push_back(back);
+	      }
+	      bit_vectors.append(update);
+	    }
+	    
+	    llvm::SmallVector<Value> transitionOps;
+	    for (auto input_bits : bit_vectors) {
+	      llvm::DenseMap<Value, netValue> stateMap;
+	      size_t bit_start = 0;
+	      for (auto i : inputs) {
+		auto num_bits = i.getType().getIntOrFloatBitWidth();
+		std::string val = input_bits.substr(bit_start, num_bits);
+		stateMap[i] = {false, APInt(num_bits, StringRef(val), 2)};
+		bit_start += num_bits;
+	      }
+	      simulateOps(traverseOrder, stateMap, idleState);
+	      for (auto [key, val] : idleState) {
+		if (stateMap[key] != val) {
+		  // transition from idle state
+		  llvm::SmallVector<Value> transitionInputOps;
+		  for (auto i : inputs) {
+		    Value inputValOp = s.constant(stateMap[i].value);
+		    Value inputCmpOp = s.cmp(i, inputValOp, comb::ICmpPredicate::eq);
+		    transitionInputOps.push_back(inputCmpOp);
+		  }
+		  Value transitionOp = s.bAnd(transitionInputOps);
+		  transitionOps.push_back(transitionOp);
+		  break;
+		}
+	      }
+	    }
+	    Value stateChangeOp = s.bOr(transitionOps, "state_change");
+	    Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
+	    wake.setValue(wakeOp);
+	     
+	  }
+	}
+      }      
+    }
+    
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
     addSequentialIOOperandsIfNeeded(op, operands);
     rewriter.replaceOpWithNewOp<hw::InstanceOp>(
-        op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
+						op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
     return success();
   }
+  
+  struct netValue {
+    bool operator!=(const netValue &rhs) const {
+      if (x) {
+	if (rhs.x) {
+	  return false;
+	} else {
+	  return true;
+	}
+      } else {
+	if (rhs.x) {
+	  return true;
+	} else {
+	  return value != rhs.value;
+	}	    
+      }
+    }
+	  
+    bool x;
+    APInt value;
+  };
 
+  void simulateOps(llvm::SmallVector<Operation*> &traverseOrder, llvm::DenseMap<Value, netValue> &stateMap, llvm::DenseMap<Value, netValue> &prevStateMap) const {
+    // TODO: more than 2 inputs
+    for (auto &op : traverseOrder) { 
+      if (isa<hw::ConstantOp>(op)) {
+	auto attr = op->getAttrOfType<mlir::IntegerAttr>("value");
+	stateMap[op->getResult(0)] = {false, attr.getValue()};
+      } else if (isa<seq::CompRegOp>(op)) {
+	if (prevStateMap.empty()) {
+	  stateMap[op->getResult(0)] = stateMap[op->getOperand(3)]; // initial value
+	} else {
+	  stateMap[op->getResult(0)] = prevStateMap[op->getOperand(0)]; // prev cycle value
+	} 
+      } else if (isa<comb::XorOp>(op)) {
+	auto res = stateMap[op->getOperand(0)].value ^ stateMap[op->getOperand(1)].value;
+	stateMap[op->getResult(0)] = {false, res};
+      } else if (isa<comb::AndOp>(op)) {
+	auto res = stateMap[op->getOperand(0)].value & stateMap[op->getOperand(1)].value;
+	stateMap[op->getResult(0)] = {false, res};
+      } else if (isa<comb::OrOp>(op)) {
+	auto res = stateMap[op->getOperand(0)].value | stateMap[op->getOperand(1)].value;
+	stateMap[op->getResult(0)] = {false, res};
+      }
+    }
+  }
+  
   virtual void buildModule(T op, BackedgeBuilder &bb, RTLBuilder &builder,
                            hw::HWModulePortAccessor &ports) const = 0;
 
@@ -825,6 +1221,7 @@ public:
   // the 'unwrapped' inputs and provide it as a separate argument.
   void buildMuxLogic(RTLBuilder &s, UnwrappedIO &unwrapped,
                      InputHandshake &select) const {
+       
     // ============================= Control logic =============================
     size_t numInputs = unwrapped.inputs.size();
     size_t selectWidth = llvm::Log2_64_Ceil(numInputs);
@@ -959,7 +1356,7 @@ public:
     }
     return priorityArb;
   }
-
+  
 private:
   OpBuilder &submoduleBuilder;
   HandshakeLoweringState &ls;
@@ -1024,11 +1421,11 @@ public:
   void buildModule(MuxOp op, BackedgeBuilder &bb, RTLBuilder &s,
                    hw::HWModulePortAccessor &ports) const override {
     auto unwrappedIO = unwrapIO(s, bb, ports);
-
+    
     // Extract select signal from the unwrapped IO.
     auto select = unwrappedIO.inputs[0];
     unwrappedIO.inputs.erase(unwrappedIO.inputs.begin());
-    buildMuxLogic(s, unwrappedIO, select);
+    buildMuxLogic(s, unwrappedIO, select);  
   };
 };
 
@@ -1848,7 +2245,8 @@ public:
 static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
                                    ConversionTarget &target,
                                    handshake::FuncOp op,
-                                   OpBuilder &moduleBuilder) {
+                                   OpBuilder &moduleBuilder,
+				   bool addWakeSignals) {
 
   std::map<std::string, unsigned> instanceNameCntr;
   NameUniquer instanceUniquer = [&](Operation *op) {
@@ -1865,7 +2263,7 @@ static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
   };
 
   auto ls = HandshakeLoweringState{op->getParentOfType<mlir::ModuleOp>(),
-                                   instanceUniquer};
+    instanceUniquer, addWakeSignals};
   RewritePatternSet patterns(op.getContext());
   patterns.insert<FuncOpConversionPattern, ReturnConversionPattern>(
       op.getContext());
@@ -1903,7 +2301,7 @@ static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
       ExtendConversionPattern<arith::ExtUIOp, /*signExtend=*/false>,
       ExtendConversionPattern<arith::ExtSIOp, /*signExtend=*/true>,
       TruncateConversionPattern, IndexCastConversionPattern>(
-      typeConverter, op.getContext(), moduleBuilder, ls);
+							     typeConverter, op.getContext(), moduleBuilder, ls);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return op->emitOpError() << "error during conversion";
@@ -1927,7 +2325,7 @@ public:
         return;
       }
     }
-
+    
     // Resolve the instance graph to get a top-level module.
     std::string topLevel;
     handshake::InstanceGraph uses;
@@ -1956,7 +2354,7 @@ public:
       auto funcOp = mod.lookupSymbol<handshake::FuncOp>(funcName);
       assert(funcOp && "handshake.func not found in module!");
       if (failed(
-              convertFuncOp(typeConverter, target, funcOp, submoduleBuilder))) {
+		 convertFuncOp(typeConverter, target, funcOp, submoduleBuilder, addWakeSignals))) {
         signalPassFailure();
         return;
       }

@@ -504,6 +504,10 @@ def HandshakeToHW : Pass<"lower-handshake-to-hw", "mlir::ModuleOp"> {
   let constructor = "circt::createHandshakeToHWPass()";
   let dependentDialects = ["hw::HWDialect", "esi::ESIDialect", "comb::CombDialect",
                            "seq::SeqDialect"];
+  let options = [
+    Option<"addWakeSignals", "add-wake-signals", "bool", "false",
+      "Add power gating wake signals to each actor">
+   ];
 }
 
 //===----------------------------------------------------------------------===//
