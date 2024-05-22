@@ -757,152 +757,21 @@ public:
           });
 
       if (ls.addWakeSignals) {
-	// find idle state
-	llvm::SmallVector<Operation*> traverseOrder;
-	llvm::SetVector<Operation*> ordered;
-	llvm::SmallVector<Operation*> stack;
-	for (auto &op : implModule.getBodyBlock()->getOperations()) {
-	  if (isa<esi::WrapValidReadyOp>(op) || isa<esi::UnwrapValidReadyOp>(op)) {
-	    ordered.insert(&op);
-	  }
-	  if (!ordered.contains(&op)) {
-	    stack.push_back(&op);
-	  }
-	  while (!stack.empty()) {
-	    auto peek = stack.back();
-	    bool pop = true;
-	    if (isa<esi::WrapValidReadyOp>(peek) || isa<esi::UnwrapValidReadyOp>(peek)) {
-	      stack.pop_back();
-	    } else {
-	      if (!isa<seq::CompRegOp>(peek)) {
-		for (auto operand : peek->getOperands()) {
-		  if (!isa<BlockArgument>(operand) && !ordered.contains(operand.getDefiningOp())) {
-		    stack.push_back(operand.getDefiningOp());
-		    pop = false;
-		  }
-		}
-	      } else {
-		if (!ordered.contains(peek->getOperand(3).getDefiningOp())) {
-		  stack.push_back(peek->getOperand(3).getDefiningOp());
-		  pop = false;
-		}
-	      }
-	      if (pop) {
-		traverseOrder.push_back(peek);
-		stack.pop_back();
-		ordered.insert(peek);
-	      }
-	    }
-	  }
-	}
+	WakeSignalHelper wakeHelper(implModule);
 
-	llvm::SmallVector<llvm::DenseMap<Value, netValue>> history;
-	bool idleStateExists = false;
-	while (true) {
-	  llvm::DenseMap<Value, netValue> stateMap;
-	  for (auto wrapOp : implModule.getBodyBlock()->getOps<esi::WrapValidReadyOp>()) {
-	    stateMap[wrapOp->getResult(1)] = {false, APInt(1, 1)}; // ready
-	  }
-	  for (auto unwrapOp : implModule.getBodyBlock()->getOps<esi::UnwrapValidReadyOp>()) {
-	    stateMap[unwrapOp->getResult(0)] = {true, APInt(1,1)}; // data
-	    stateMap[unwrapOp->getResult(1)] = {false, APInt(1, 0)}; // valid
-	  }
-
-	  DenseMap<Value, netValue> prevStateMap;
-	  if (!history.empty()) {
-	    prevStateMap = history.back();
-	  }
-	  simulateOps(traverseOrder, stateMap, prevStateMap); 
-
-	  if (history.size() > 0) {
-	    if (history.back() == stateMap) {
-	      // self edge
-	      idleStateExists = true;
-	      break;
-	    } else if (std::find(history.begin(), history.end(), stateMap) != history.end()) {
-	      // cycle
-	      break;
-	    }
-	  }
-  	  history.push_back(stateMap);
-	}
-
-	llvm::DenseMap<Value, netValue> idleState;
-	for (auto op : implModule.getBodyBlock()->getOps<seq::CompRegOp>()) {
-	  idleState[op->getResult(0)] = history.back()[op->getResult(0)];
-	}
-
+	// find idle state, if it exists
+	llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
+	bool idleStateExists = wakeHelper.findIdleState(idleState);
+      
 	if (idleStateExists) {
-	  // partition circuit
-	  // get all outbound ready and valid signals (input ready and output valid)
-	  llvm::SmallVector<Value> trace;
-	  llvm::SetVector<Value> ctrl;
-	  llvm::SetVector<Value> out_val;
-	  llvm::SetVector<Value> in_rdy;
-	  for (auto i : implModule.getBodyBlock()->getArguments()) {
-	    if (isa<esi::ChannelType>(i.getType())) {
-	      auto user = i.getUsers().begin();
-	      auto ready = user->getOperands()[1];
-	      trace.push_back(ready);
-	      in_rdy.insert(ready);
-	    } 
-	  }
-	  for (auto i : implModule.getBodyBlock()->getTerminator()->getOperands()) {
-	    if (isa<esi::ChannelType>(i.getType())) {
-	      auto valid = i.getDefiningOp()->getOperands()[1];
-	      trace.push_back(valid);
-	      out_val.insert(valid);
-	    }
-	  }
-	
-	  while (!trace.empty()) {
-	    auto net = trace.back();
-	    trace.pop_back();
-	    if (!ctrl.contains(net)) {
-	      ctrl.insert(net);
-	      if (!isa<BlockArgument>(net) && !isa<esi::WrapValidReadyOp>(net.getDefiningOp()) && !isa<esi::UnwrapValidReadyOp>(net.getDefiningOp())) {
-		for (auto i : net.getDefiningOp()->getOperands()) {
-		  trace.push_back(i);
-		}
-	      }
-	    }
-	  }
-	  // sleepable ops are not wrap/unwrap and have an operand that isn't in control
+	  // get ops that can sleep in the idle state
 	  llvm::SetVector<Operation*> data_ops;
-	  for (auto &op : implModule.getBodyBlock()->getOperations()) {
-	    if (!isa<esi::WrapValidReadyOp>(op) && !isa<esi::UnwrapValidReadyOp>(op) && !isa<hw::OutputOp>(op)) {
-	      for (auto i : op.getOperands()) {
-		if (!ctrl.contains(i)) {
-		  data_ops.insert(&op);
-		  break;
-		}
-	      }
-	    }
-	  }
-	
-	  // inputs to sleepable are operands that aren't also sleepable
-	  // outputs from sleepable are results that aren't also sleepable
 	  llvm::SmallVector<Value> input_args;
 	  llvm::SetVector<Value> output_args;
-	  for (auto &op : data_ops) {
-	    for (auto i : op->getOperands()) {
-	      if (!data_ops.contains(i.getDefiningOp())) {
-		// operand not produced by sleepable op
-		input_args.push_back(i);
-	      }
-	    }
-	    for (auto res : op->getResults()) {
-	      for (auto use : res.getUsers()) {
-		if (!data_ops.contains(use)) {
-		  output_args.insert(res);
-		}
-	      }
-	    }
-	  }
-
-	
+	  wakeHelper.getDataOps(data_ops, input_args, output_args);
+	  
+	  // create sleepable module
 	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
-	  auto portInfo = ModulePortInfo(getPortInfoForOp(implModule));
 	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	  std::map<int, Backedge> bmap;
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
@@ -925,7 +794,6 @@ public:
 	  }
 	  output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
 	
-	  // create sleepable module
 	  submoduleBuilder.setInsertionPoint(op->getParentOp());
 	  auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
 	    for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
@@ -979,39 +847,31 @@ public:
 	  // gate outputs with awake signal
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto awake = sleepInstance->getResults().back();
-	  for (auto valid : out_val) {
-	    //auto validAndAwake = submoduleBuilder.create<comb::AndOp>(op->getLoc(), ValueRange({valid, awake}), false);
+	  for (auto valid : wakeHelper.getOutValid()) {
 	    auto validAndAwake = s.bAnd({valid, awake});
 	    valid.replaceUsesWithIf(validAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &valid) -> bool {
 	      return isa<esi::WrapValidReadyOp>(valid.getOwner()) || isa<esi::UnwrapValidReadyOp>(valid.getOwner());
 	    }));
 	  }	
-	  for (auto ready : in_rdy) {
-	    //auto readyAndAwake = submoduleBuilder.create<comb::AndOp>(op->getLoc(), ValueRange({ready, awake}), false);
+	  for (auto ready : wakeHelper.getInReady()) {
 	    auto readyAndAwake = s.bAnd({ready, awake});
 	    ready.replaceUsesWithIf(readyAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &ready) -> bool {
 	      return isa<esi::WrapValidReadyOp>(ready.getOwner()) || isa<esi::UnwrapValidReadyOp>(ready.getOwner());
 	    }));
 	  }
 	
-	  // find idle state if needed and define wake signal
-	  Value outValidOp = s.bOr(ValueRange(out_val.getArrayRef()), "out_valid");
+	  // define wake signal
+	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid();
+	  Value outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
  	  auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
 	  if (regOps.empty()) {
 	    wake.setValue(outValidOp);
 	  } else {
-	    // find inputs that drive idle state
-	    llvm::SmallVector<Value> inputs;
-	    llvm::SmallVector<Value> stack;
-	    llvm::SetVector<Value> visited;
-    	    llvm::SmallVector<Value> idleStateOps;
+	    // add idle state ops
+	     llvm::SmallVector<Value> idleStateOps;
 	    for (auto [key, val] : idleState) {
 	      if (!val.x) {
-		// don't worry about don't cares
-		stack.push_back(key.getDefiningOp()->getOperand(0));
-		stack.push_back(key.getDefiningOp()->getOperand(3));
-
-		auto idleValOp = s.constant(val.value);
+        	auto idleValOp = s.constant(val.value);
 		auto idleCmpOp = s.cmp(key, idleValOp, comb::ICmpPredicate::eq);
 		idleStateOps.push_back(idleCmpOp);
 	      }
@@ -1019,83 +879,28 @@ public:
 	    Value idleOp = s.bAnd(idleStateOps, "idle");
 	    Value notIdleOp = s.bNot(idleOp);
 	    
-	    while (!stack.empty()) {
-	      auto net = stack.back();
-	      stack.pop_back();
-	      visited.insert(net);
-		  
-	      if (isa<BlockArgument>(net)) {
-		inputs.push_back(net);
-	      } else {
-		auto op = net.getDefiningOp();
-		if (isa<esi::WrapValidReadyOp>(op) || isa<esi::UnwrapValidReadyOp>(op)) {
-		  // handshake inputs
-		  for (auto result : op->getResults()) {
-		    if (result == net) {
-		      inputs.push_back(result);
-		    }
-		  }
-		} else if (isa<seq::CompRegOp>(op)) {
-		  stack.push_back(op->getOperand(0));
-		  stack.push_back(op->getOperand(3));
-		} else {
-		  for (auto operand : op->getOperands()) {
-		    if (!visited.contains(operand)) {
-		      stack.push_back(operand);
-		    }
-		  }
-		}
-	      }
-	    }
-	    
-	    // for every combination of inputs, check if state changes from idle
-	    size_t num_bits = 0;
-	    for (auto i : inputs) {
-	      num_bits += i.getType().getIntOrFloatBitWidth();
-	    }
-
+	    // find inputs that drive idle state and bit vectors
+	    llvm::SmallVector<Value> inputs;
 	    llvm::SmallVector<std::string> bit_vectors;  
-	    bit_vectors.push_back("0");
-	    bit_vectors.push_back("1");
-	    for (size_t i = 0; i < num_bits-1; i++) {
-	      llvm::SmallVector<std::string> update;
-	      while (!bit_vectors.empty()) {
-	     	auto back = bit_vectors.back();
-	     	bit_vectors.pop_back();
-		auto zero = back + "0";
-	   	update.push_back(zero);
-		back = back + "1";
-		update.push_back(back);
-	      }
-	      bit_vectors.append(update);
-	    }
-	    
+	    wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
+   
+	    // add idle state transition ops
 	    llvm::SmallVector<Value> transitionOps;
 	    for (auto input_bits : bit_vectors) {
-	      llvm::DenseMap<Value, netValue> stateMap;
-	      size_t bit_start = 0;
+      	      size_t bit_start = 0;
+	      llvm::SmallVector<Value> transitionInputOps;
 	      for (auto i : inputs) {
 		auto num_bits = i.getType().getIntOrFloatBitWidth();
 		std::string val = input_bits.substr(bit_start, num_bits);
-		stateMap[i] = {false, APInt(num_bits, StringRef(val), 2)};
+		Value inputValOp = s.constant(APInt(num_bits, StringRef(val), 2));
+		Value inputCmpOp = s.cmp(i, inputValOp, comb::ICmpPredicate::eq);
+		transitionInputOps.push_back(inputCmpOp);
 		bit_start += num_bits;
 	      }
-	      simulateOps(traverseOrder, stateMap, idleState);
-	      for (auto [key, val] : idleState) {
-		if (stateMap[key] != val) {
-		  // transition from idle state
-		  llvm::SmallVector<Value> transitionInputOps;
-		  for (auto i : inputs) {
-		    Value inputValOp = s.constant(stateMap[i].value);
-		    Value inputCmpOp = s.cmp(i, inputValOp, comb::ICmpPredicate::eq);
-		    transitionInputOps.push_back(inputCmpOp);
-		  }
-		  Value transitionOp = s.bAnd(transitionInputOps);
-		  transitionOps.push_back(transitionOp);
-		  break;
-		}
-	      }
+	      Value transitionOp = s.bAnd(transitionInputOps);
+	      transitionOps.push_back(transitionOp); 
 	    }
+	    
 	    Value stateChangeOp = s.bOr(transitionOps, "state_change");
 	    Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
 	    wake.setValue(wakeOp);
@@ -1112,53 +917,7 @@ public:
 						op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
     return success();
   }
-  
-  struct netValue {
-    bool operator!=(const netValue &rhs) const {
-      if (x) {
-	if (rhs.x) {
-	  return false;
-	} else {
-	  return true;
-	}
-      } else {
-	if (rhs.x) {
-	  return true;
-	} else {
-	  return value != rhs.value;
-	}	    
-      }
-    }
-	  
-    bool x;
-    APInt value;
-  };
-
-  void simulateOps(llvm::SmallVector<Operation*> &traverseOrder, llvm::DenseMap<Value, netValue> &stateMap, llvm::DenseMap<Value, netValue> &prevStateMap) const {
-    // TODO: more than 2 inputs
-    for (auto &op : traverseOrder) { 
-      if (isa<hw::ConstantOp>(op)) {
-	auto attr = op->getAttrOfType<mlir::IntegerAttr>("value");
-	stateMap[op->getResult(0)] = {false, attr.getValue()};
-      } else if (isa<seq::CompRegOp>(op)) {
-	if (prevStateMap.empty()) {
-	  stateMap[op->getResult(0)] = stateMap[op->getOperand(3)]; // initial value
-	} else {
-	  stateMap[op->getResult(0)] = prevStateMap[op->getOperand(0)]; // prev cycle value
-	} 
-      } else if (isa<comb::XorOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value ^ stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      } else if (isa<comb::AndOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value & stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      } else if (isa<comb::OrOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value | stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      }
-    }
-  }
-  
+    
   virtual void buildModule(T op, BackedgeBuilder &bb, RTLBuilder &builder,
                            hw::HWModulePortAccessor &ports) const = 0;
 
