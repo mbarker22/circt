@@ -862,7 +862,11 @@ public:
 	
 	  // define wake signal
 	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid();
-	  Value outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
+	  Value outValidOp;
+	  if (out_valid.size() == 1)
+	    outValidOp = out_valid[0];
+	  else
+	    outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
  	  auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
 	  if (regOps.empty()) {
 	    wake.setValue(outValidOp);
