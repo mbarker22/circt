@@ -277,8 +277,22 @@ static HWModuleLike checkSubModuleOp(mlir::ModuleOp parentModule,
 
 /// Returns a vector of PortInfo's which defines the HW interface of the
 /// to-be-converted op.
-static ModulePortInfo getPortInfoForOp(Operation *op) {
-  return getPortInfoForOpTypes(op, op->getOperandTypes(), op->getResultTypes());
+static ModulePortInfo getPortInfoForOp(Operation *op, bool overrideClock) {
+  ModulePortInfo portInfo = getPortInfoForOpTypes(op, op->getOperandTypes(), op->getResultTypes());;
+  if (!op->template hasTrait<mlir::OpTrait::HasClock>() && overrideClock) {
+    SmallVector<hw::PortInfo> inputs(portInfo.getInputs());
+    SmallVector<hw::PortInfo> outputs(portInfo.getOutputs());
+    inputs.push_back({{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()),
+	  hw::ModulePort::Direction::Input},
+	portInfo.sizeInputs(),
+	{}});
+    inputs.push_back({{StringAttr::get(op->getContext(), "reset"), IntegerType::get(op->getContext(), 1),
+	  hw::ModulePort::Direction::Input},
+	portInfo.sizeInputs()+1,
+	{}});
+    portInfo = hw::ModulePortInfo{inputs, outputs};
+  } 
+  return portInfo;
 }
 
 static llvm::SmallVector<hw::detail::FieldInfo>
@@ -559,6 +573,11 @@ struct RTLBuilder {
         [&]() { return b.create<comb::ShlOp>(loc, value, shift); }, name);
   }
 
+  Value shrU(Value value, Value shift, std::optional<StringRef> name = {}) {
+    return buildNamedOp(
+        [&]() { return b.create<comb::ShrUOp>(loc, value, shift); }, name);
+  }
+
   Value concat(ValueRange values, std::optional<StringRef> name = {}) {
     return buildNamedOp([&]() { return b.create<comb::ConcatOp>(loc, values); },
                         name);
@@ -706,8 +725,8 @@ static Value createZeroDataConst(RTLBuilder &s, Location loc, Type type) {
 
 static void
 addSequentialIOOperandsIfNeeded(Operation *op,
-                                llvm::SmallVectorImpl<Value> &operands) {
-  if (op->hasTrait<mlir::OpTrait::HasClock>()) {
+                                llvm::SmallVectorImpl<Value> &operands, bool overrideClock) {
+  if (op->hasTrait<mlir::OpTrait::HasClock>() || overrideClock) {
     // Parent should at this point be a hw.module and have clock and reset
     // ports.
     auto parent = cast<hw::HWModuleOp>(op->getParentOp());
@@ -739,7 +758,7 @@ public:
     hw::HWModuleLike implModule = checkSubModuleOp(ls.parentModule, op);
     if (!implModule) {
       
-      auto portInfo = ModulePortInfo(getPortInfoForOp(op));
+      auto portInfo = ModulePortInfo(getPortInfoForOp(op, ls.addWakeSignals));
       submoduleBuilder.setInsertionPoint(op->getParentOp());
       implModule = submoduleBuilder.create<hw::HWModuleOp>(
           op.getLoc(), submoduleBuilder.getStringAttr(getSubModuleName(op)),
@@ -747,7 +766,7 @@ public:
             // if 'op' has clock trait, extract these and provide them to the
             // RTL builder.
             Value clk, rst;
-            if (op->template hasTrait<mlir::OpTrait::HasClock>()) {
+            if (op->template hasTrait<mlir::OpTrait::HasClock>() || ls.addWakeSignals) {
               clk = ports.getInput("clock");
               rst = ports.getInput("reset");
             }
@@ -764,15 +783,26 @@ public:
 	bool idleStateExists = wakeHelper.findIdleState(idleState);
       
 	if (idleStateExists) {
+	  // add clock and reset if needed
+	  // if (!op->template hasTrait<mlir::OpTrait::HasClock>()) {
+	  //   unsigned origNumInputs = implModule.getNumInputPorts();
+	  //   SmallVector<std::pair<unsigned, hw::PortInfo>> newInputs;
+	  //   newInputs.push_back(std::make_pair(
+	  // 				       origNumInputs,
+	  // 				       hw::PortInfo{{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()), ModulePort::Direction::Input}, origNumInputs}));
+	  //   auto mutableModule = dyn_cast<hw::HWMutableModuleLike>(implModule);
+	  //   mutableModule.insertPorts(newInputs, {});
+	  // }
+	  
 	  // get ops that can sleep in the idle state
 	  llvm::SetVector<Operation*> data_ops;
 	  llvm::SmallVector<Value> input_args;
 	  llvm::SetVector<Value> output_args;
 	  wakeHelper.getDataOps(data_ops, input_args, output_args);
-	  
+		  
 	  // create sleepable module
 	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
-	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
+	  //RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	  std::map<int, Backedge> bmap;
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto wake = bb.get(IntegerType::get(op->getContext(), 1));
@@ -783,7 +813,9 @@ public:
 	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
 	    if (idx == input_args.size()-1) {
 	      // last input arg is wake
-	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "wake"), arg.getType(), ModulePort::Direction::Input}, idx});
+	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "wake"), arg.getType(), ModulePort::Direction::Input}, idx++});
+	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()), hw::ModulePort::Direction::Input}, idx++});
+	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "reset"), IntegerType::get(op->getContext(), 1), hw::ModulePort::Direction::Input}, idx});
 	      break;
 	    }
 	    input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "in" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Input}, idx});
@@ -800,7 +832,16 @@ public:
 	      if (idx == ports.getPortList().sizeOutputs()-1) {
 		// last output is awake
 		// TODO: randomize wake time
-		ports.setOutput(port.name, ports.getInputs().back());
+		RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
+		auto delayConst = s.constant(8, 1);
+		auto delay = bb.get(IntegerType::get(op->getContext(), 8));
+		auto delayReg = s.reg("delay", delay, delayConst);
+		auto delayEqZero = s.bNot(s.rOr(delayReg));
+		auto shiftDelay = s.shrU(delayReg, s.constant(8, 1));
+		auto selectHoldOrShift = s.mux(delayEqZero, {shiftDelay, delayReg});
+		auto selectWakeOrReset = s.mux(ports.getInput("wake"), {delayConst, selectHoldOrShift});
+		delay.setValue(selectWakeOrReset);
+		ports.setOutput(port.name, s.bAnd({ports.getInput("wake"), delayEqZero}));
 		break;
 	      }
 	      auto backedge = bb.get(port.type);
@@ -808,7 +849,13 @@ public:
 	      bmap[idx] = backedge;
 	    }
 	  });
-	
+
+	  //if (!op->template hasTrait<mlir::OpTrait::HasClock>()) {
+	    // add clock and reset args
+	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
+	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
+	    //}
+	  
 	  // instantiate sleepable module
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
@@ -844,24 +891,38 @@ public:
 	    res.getDefiningOp()->erase();
 	  }
 
+	  // get original out_valid and state transition inputs for wake signal before adding awake gates
+	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
+	  llvm::SmallVector<Value> inputs;
+	  llvm::SmallVector<std::string> bit_vectors;
+	  if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
+	    wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
+	  }
+	  
 	  // gate outputs with awake signal
+	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto awake = sleepInstance->getResults().back();
 	  for (auto valid : wakeHelper.getOutValid()) {
 	    auto validAndAwake = s.bAnd({valid, awake});
-	    valid.replaceUsesWithIf(validAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &valid) -> bool {
-	      return isa<esi::WrapValidReadyOp>(valid.getOwner()) || isa<esi::UnwrapValidReadyOp>(valid.getOwner());
-	    }));
+	    valid.replaceAllUsesExcept(validAndAwake, validAndAwake.getDefiningOp());
+	    // implModule.replaceUsesOfWith(valid, validAndAwake);
+	    // valid.getDefiningOp().replaceAllUsesWith(validAndAwake);
+	    //valid.replaceAllUsesWith(validAndAwake);
+	    //valid.replaceUsesWithIf(validAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &valid) -> bool {
+	    //  return isa<esi::WrapValidReadyOp>(valid.getOwner()) || isa<esi::UnwrapValidReadyOp>(valid.getOwner());
+	    //}));
 	  }	
 	  for (auto ready : wakeHelper.getInReady()) {
 	    auto readyAndAwake = s.bAnd({ready, awake});
-	    ready.replaceUsesWithIf(readyAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &ready) -> bool {
-	      return isa<esi::WrapValidReadyOp>(ready.getOwner()) || isa<esi::UnwrapValidReadyOp>(ready.getOwner());
-	    }));
+	    ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
+	    //ready.replaceAllUsesWith(readyAndAwake);
+	    // ready.replaceUsesWithIf(readyAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &ready) -> bool {
+	    //   return isa<esi::WrapValidReadyOp>(ready.getOwner()) || isa<esi::UnwrapValidReadyOp>(ready.getOwner());
+	    // }));
 	  }
 	
 	  // define wake signal
-	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid();
 	  Value outValidOp;
 	  if (out_valid.size() == 1)
 	    outValidOp = out_valid[0];
@@ -884,9 +945,9 @@ public:
 	    Value notIdleOp = s.bNot(idleOp);
 	    
 	    // find inputs that drive idle state and bit vectors
-	    llvm::SmallVector<Value> inputs;
-	    llvm::SmallVector<std::string> bit_vectors;  
-	    wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
+	    //llvm::SmallVector<Value> inputs;
+	    //llvm::SmallVector<std::string> bit_vectors;  
+	    //wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
    
 	    // add idle state transition ops
 	    llvm::SmallVector<Value> transitionOps;
@@ -916,7 +977,16 @@ public:
     
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
-    addSequentialIOOperandsIfNeeded(op, operands);
+    addSequentialIOOperandsIfNeeded(op, operands, ls.addWakeSignals);
+
+    // if (ls.addWakeSignals) {
+    //   auto parent = cast<hw::HWModuleOp>(op->getParentOp());
+    //   operands.push_back(
+    // 			 parent.getArgumentForInput(parent.getNumInputPorts() - 2));
+    //   operands.push_back(
+    // 			 parent.getArgumentForInput(parent.getNumInputPorts() - 1));
+    // }
+    
     rewriter.replaceOpWithNewOp<hw::InstanceOp>(
 						op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
     return success();
@@ -1937,14 +2007,14 @@ public:
 
     hw::HWModuleLike implModule = checkSubModuleOp(ls.parentModule, op);
     if (!implModule) {
-      auto portInfo = ModulePortInfo(getPortInfoForOp(op));
+      auto portInfo = ModulePortInfo(getPortInfoForOp(op, false));
       implModule = submoduleBuilder.create<hw::HWModuleExternOp>(
           op.getLoc(), submoduleBuilder.getStringAttr(getSubModuleName(op)),
           portInfo);
     }
 
     llvm::SmallVector<Value> operands = adaptor.getOperands();
-    addSequentialIOOperandsIfNeeded(op, operands);
+    addSequentialIOOperandsIfNeeded(op, operands, false);
     rewriter.replaceOpWithNewOp<hw::InstanceOp>(
         op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
     return success();
@@ -1963,7 +2033,7 @@ public:
   matchAndRewrite(handshake::FuncOp op, OpAdaptor operands,
                   ConversionPatternRewriter &rewriter) const override {
     ModulePortInfo ports =
-        getPortInfoForOpTypes(op, op.getArgumentTypes(), op.getResultTypes());
+      getPortInfoForOpTypes(op, op.getArgumentTypes(), op.getResultTypes());
 
     HWModuleLike hwModule;
     if (op.isExternal()) {

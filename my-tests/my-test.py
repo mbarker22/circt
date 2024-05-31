@@ -74,7 +74,7 @@ insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE'
 for i in inputs:
     template.insert(insertPoint, "acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\ntrace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i, i, i, i, i, i, i, i))
 for o in outputs:
-    template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, out0);\ntrace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o, o, o, o, o, o))
+    template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\ntrace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o, o, o, o, o, o, o))
 
 insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
 for i in inputs:

@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
-  for ( ; main_time < 50 * 4; main_time++) {
+  for ( ; main_time < 200 * 4; main_time++) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 
