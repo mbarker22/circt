@@ -28,12 +28,14 @@ void acceptInput(CData &ready, CData &valid, QData &data, std::vector<int> &offe
   if (ready && valid) {
     accepted.push_back(data);
     offered.pop_back();
+    valid = 0x0;
   }
 }
 
 void recordOutput(CData &ready, CData &valid, QData &data, std::vector<int> &output) {
   if (ready && valid) {
     output.push_back(data);
+    ready = 0x0;
   }
 }
 
@@ -70,7 +72,7 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
-  for ( ; main_time < 200 * 4; main_time++) {
+  for ( ; main_time < 800 * 4; main_time++) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 

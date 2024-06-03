@@ -66,15 +66,17 @@ for o in outputs:
 
 insertPoint = [idx for idx, line in enumerate(template) if re.search('INPUTS', line)][0]
 for i in inputs:
-    template.insert(insertPoint, "tb->%s = %s_offered.back();\ntb->%s_valid = (%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0;\n"%(i, i, i, i))
+    template.insert(insertPoint, "tb->%s = %s_offered.back();\nif (tb->%s_valid == 0) tb->%s_valid = (%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0;\n"%(i, i, i, i, i))
+    # template.insert(insertPoint, "tb->%s = %s_offered.back();\ntb->%s_valid = (%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0;\n"%(i, i, i, i))
 for o in outputs:
-    template.insert(insertPoint, "tb->%s_ready = myrand() & 0x1;\n"%(o))
+    template.insert(insertPoint, "if (tb->%s_ready == 0) tb->%s_ready = myrand() & 0x1;\n"%(o, o))
+    # template.insert(insertPoint, "tb->%s_ready = myrand() & 0x1;\n"%(o))
 
 insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
 for i in inputs:
-    template.insert(insertPoint, "acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\ntrace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i, i, i, i, i, i, i, i))
+    template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\nacceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i, i, i, i, i, i, i, i))
 for o in outputs:
-    template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\ntrace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o, o, o, o, o, o, o))
+    template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\nrecordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o, o, o, o, o, o, o))
 
 insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
 for i in inputs:
@@ -105,8 +107,8 @@ result = subprocess.run("diff top.sv.d/%s0.out top.sv.d/%s1.out"%(test, test), s
 cleanup = ["my-driver.cpp", "%s.mlir-out"%(test), "top.sv"]
 if (len(result.stdout) == 0):
     print("%s PASS"%(test))
-    for f in cleanup:
-        if (os.path.isfile(f)):
-            os.remove(f)
+    # for f in cleanup:
+    #     if (os.path.isfile(f)):
+    #         os.remove(f)
 else:
     print("%s FAIL"%(test))

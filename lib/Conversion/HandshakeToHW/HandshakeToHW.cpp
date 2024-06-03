@@ -826,7 +826,7 @@ public:
 		// last output is awake
 		// add ops to insert a random wake time
 		int width = 8;
-		int rand_int = rand() % 4;
+		int rand_int = rand() % 16;
 		RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
 		auto delayConst = s.constant(width, rand_int);
 		auto delay = bb.get(IntegerType::get(op->getContext(), width));
