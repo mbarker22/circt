@@ -578,6 +578,11 @@ struct RTLBuilder {
         [&]() { return b.create<comb::ShrUOp>(loc, value, shift); }, name);
   }
 
+  Value sub(Value value, Value sub, std::optional<StringRef> name = {}) {
+    return buildNamedOp(
+			[&]() { return b.create<comb::SubOp>(loc, value, sub); }, name);
+  }
+
   Value concat(ValueRange values, std::optional<StringRef> name = {}) {
     return buildNamedOp([&]() { return b.create<comb::ConcatOp>(loc, values); },
                         name);
@@ -782,18 +787,7 @@ public:
 	llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
 	bool idleStateExists = wakeHelper.findIdleState(idleState);
       
-	if (idleStateExists) {
-	  // add clock and reset if needed
-	  // if (!op->template hasTrait<mlir::OpTrait::HasClock>()) {
-	  //   unsigned origNumInputs = implModule.getNumInputPorts();
-	  //   SmallVector<std::pair<unsigned, hw::PortInfo>> newInputs;
-	  //   newInputs.push_back(std::make_pair(
-	  // 				       origNumInputs,
-	  // 				       hw::PortInfo{{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()), ModulePort::Direction::Input}, origNumInputs}));
-	  //   auto mutableModule = dyn_cast<hw::HWMutableModuleLike>(implModule);
-	  //   mutableModule.insertPorts(newInputs, {});
-	  // }
-	  
+	if (idleStateExists) {	  
 	  // get ops that can sleep in the idle state
 	  llvm::SetVector<Operation*> data_ops;
 	  llvm::SmallVector<Value> input_args;
@@ -802,7 +796,6 @@ public:
 		  
 	  // create sleepable module
 	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
-	  //RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	  std::map<int, Backedge> bmap;
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto wake = bb.get(IntegerType::get(op->getContext(), 1));
@@ -831,15 +824,17 @@ public:
 	    for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
 	      if (idx == ports.getPortList().sizeOutputs()-1) {
 		// last output is awake
-		// TODO: randomize wake time
+		// add ops to insert a random wake time
+		int width = 8;
+		int rand_int = rand() % 4;
 		RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
-		auto delayConst = s.constant(8, 1);
-		auto delay = bb.get(IntegerType::get(op->getContext(), 8));
+		auto delayConst = s.constant(width, rand_int);
+		auto delay = bb.get(IntegerType::get(op->getContext(), width));
 		auto delayReg = s.reg("delay", delay, delayConst);
 		auto delayEqZero = s.bNot(s.rOr(delayReg));
-		auto shiftDelay = s.shrU(delayReg, s.constant(8, 1));
-		auto selectHoldOrShift = s.mux(delayEqZero, {shiftDelay, delayReg});
-		auto selectWakeOrReset = s.mux(ports.getInput("wake"), {delayConst, selectHoldOrShift});
+		auto decDelay = s.sub(delayReg, s.constant(width, 1));
+		auto selectHoldOrDec = s.mux(delayEqZero, {decDelay, delayReg});
+		auto selectWakeOrReset = s.mux(ports.getInput("wake"), {delayConst, selectHoldOrDec});
 		delay.setValue(selectWakeOrReset);
 		ports.setOutput(port.name, s.bAnd({ports.getInput("wake"), delayEqZero}));
 		break;
@@ -850,11 +845,9 @@ public:
 	    }
 	  });
 
-	  //if (!op->template hasTrait<mlir::OpTrait::HasClock>()) {
-	    // add clock and reset args
+	  // add clock and reset args
 	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
 	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
-	    //}
 	  
 	  // instantiate sleepable module
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
@@ -906,20 +899,10 @@ public:
 	  for (auto valid : wakeHelper.getOutValid()) {
 	    auto validAndAwake = s.bAnd({valid, awake});
 	    valid.replaceAllUsesExcept(validAndAwake, validAndAwake.getDefiningOp());
-	    // implModule.replaceUsesOfWith(valid, validAndAwake);
-	    // valid.getDefiningOp().replaceAllUsesWith(validAndAwake);
-	    //valid.replaceAllUsesWith(validAndAwake);
-	    //valid.replaceUsesWithIf(validAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &valid) -> bool {
-	    //  return isa<esi::WrapValidReadyOp>(valid.getOwner()) || isa<esi::UnwrapValidReadyOp>(valid.getOwner());
-	    //}));
 	  }	
 	  for (auto ready : wakeHelper.getInReady()) {
 	    auto readyAndAwake = s.bAnd({ready, awake});
 	    ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
-	    //ready.replaceAllUsesWith(readyAndAwake);
-	    // ready.replaceUsesWithIf(readyAndAwake, function_ref<bool(OpOperand &)>([](OpOperand &ready) -> bool {
-	    //   return isa<esi::WrapValidReadyOp>(ready.getOwner()) || isa<esi::UnwrapValidReadyOp>(ready.getOwner());
-	    // }));
 	  }
 	
 	  // define wake signal
@@ -933,7 +916,7 @@ public:
 	    wake.setValue(outValidOp);
 	  } else {
 	    // add idle state ops
-	     llvm::SmallVector<Value> idleStateOps;
+	    llvm::SmallVector<Value> idleStateOps;
 	    for (auto [key, val] : idleState) {
 	      if (!val.x) {
         	auto idleValOp = s.constant(val.value);
@@ -943,11 +926,6 @@ public:
 	    }
 	    Value idleOp = s.bAnd(idleStateOps, "idle");
 	    Value notIdleOp = s.bNot(idleOp);
-	    
-	    // find inputs that drive idle state and bit vectors
-	    //llvm::SmallVector<Value> inputs;
-	    //llvm::SmallVector<std::string> bit_vectors;  
-	    //wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
    
 	    // add idle state transition ops
 	    llvm::SmallVector<Value> transitionOps;
@@ -977,16 +955,7 @@ public:
     
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
-    addSequentialIOOperandsIfNeeded(op, operands, ls.addWakeSignals);
-
-    // if (ls.addWakeSignals) {
-    //   auto parent = cast<hw::HWModuleOp>(op->getParentOp());
-    //   operands.push_back(
-    // 			 parent.getArgumentForInput(parent.getNumInputPorts() - 2));
-    //   operands.push_back(
-    // 			 parent.getArgumentForInput(parent.getNumInputPorts() - 1));
-    // }
-    
+    addSequentialIOOperandsIfNeeded(op, operands, ls.addWakeSignals);    
     rewriter.replaceOpWithNewOp<hw::InstanceOp>(
 						op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
     return success();

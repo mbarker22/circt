@@ -92,6 +92,7 @@ namespace handshake {
 	  // self edge - idle state found
 	  for (auto [key, val] : stateMap) {
 	    if (isa<seq::CompRegOp>(key.getDefiningOp()) && !val.x) {
+	      //std::cerr << "add reg to idle\n";
 	      idleState[key] = val;
 	    }
 	  }
@@ -115,6 +116,7 @@ namespace handshake {
 	stack.push_back(key.getDefiningOp()->getOperand(3));
       }
     }
+
     while (!stack.empty()) {
       auto net = stack.back();
       stack.pop_back();
@@ -166,6 +168,10 @@ namespace handshake {
     }
 
     // simulate to find inputs that transition out of idle state
+    llvm::DenseMap<Value, WakeSignalHelper::netValue> prevStateMap;
+    for (auto [key, value] : state) {
+      prevStateMap[key.getDefiningOp()->getOperand(0)] = value;
+    }
     for (auto input_bits : bit_vectors) {
       llvm::DenseMap<Value, WakeSignalHelper::netValue> stateMap;
       size_t bit_start = 0;
@@ -175,15 +181,15 @@ namespace handshake {
 	stateMap[i] = {false, APInt(num_bits, StringRef(val), 2)};
 	bit_start += num_bits;
       }
-      simulateOps(stateMap, state);
+      simulateOps(stateMap, prevStateMap);
       for (auto [key, val] : state) {
-	if (stateMap[key] != val) {
+	if (stateMap[key.getDefiningOp()->getOperand(0)] != val) {
 	  // transition from idle state
 	  transition_bit_vectors.push_back(input_bits);
 	  break;
 	}
       }
-    }	  
+    }
   }
 
   void WakeSignalHelper::getDataOps(llvm::SetVector<Operation*> &data_ops, llvm::SmallVector<Value> &input_args, llvm::SetVector<Value> &output_args) {
@@ -280,7 +286,7 @@ namespace handshake {
   
   void WakeSignalHelper::simulateOps(llvm::DenseMap<Value, netValue> &stateMap, llvm::DenseMap<Value, netValue> &prevStateMap) {
     // TODO: more than 2 inputs
-    for (auto &op : traverseOrder) { 
+    for (auto &op : traverseOrder) {
       if (isa<hw::ConstantOp>(op)) {
 	auto attr = op->getAttrOfType<mlir::IntegerAttr>("value");
 	stateMap[op->getResult(0)] = {false, attr.getValue()};
@@ -299,7 +305,7 @@ namespace handshake {
       } else if (isa<comb::OrOp>(op)) {
 	auto res = stateMap[op->getOperand(0)].value | stateMap[op->getOperand(1)].value;
 	stateMap[op->getResult(0)] = {false, res};
-      }
+      } 
     }
   }
 
