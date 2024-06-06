@@ -960,16 +960,21 @@ public:
 	    auto readyAndAwake = s.bAnd({ready, awake});
 	    ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
 	  }
-	
+
+	 
 	  // define wake signal
 	  Value outValidOp;
 	  if (out_valid.size() == 1)
 	    outValidOp = out_valid[0];
-	  else
+	  else if (out_valid.size() > 1)
 	    outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
  	  auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
 	  if (regOps.empty()) {
-	    wake.setValue(outValidOp);
+	    if (isa<SinkOp>(op)) {
+	      wake.setValue(wakeHelper.getInReady()[0]);
+	    } else {
+	      wake.setValue(outValidOp);
+	    }
 	  } else {
 	    // add idle state ops
 	    llvm::SmallVector<Value> idleStateOps;
