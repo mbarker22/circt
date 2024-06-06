@@ -793,6 +793,26 @@ public:
 	  llvm::SmallVector<Value> input_args;
 	  llvm::SetVector<Value> output_args;
 	  wakeHelper.getDataOps(data_ops, input_args, output_args);
+
+	  // find out_valid and state transition inputs for wake signal before modifying circuit
+	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
+	  llvm::SmallVector<Value> state_transition_inputs;
+	  llvm::SmallVector<std::string> bit_vectors;
+	  if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
+	    wakeHelper.getStateTransitionInputs(state_transition_inputs, idleState, bit_vectors);
+	  }
+	  
+	  // std::cerr << "data ops:\n";
+	  // for (auto op: data_ops) {
+	  //   op->print(llvm::errs());
+	  //   std::cerr << "\n";
+	  // }
+	  // std::cerr << "output args:\n";
+	  // AsmState asmState(implModule, OpPrintingFlags().assumeVerified());
+	  // for (auto arg: output_args) {
+	  //   arg.printAsOperand(llvm::errs(), asmState);
+	  //   std::cerr << "\n";
+	  // }
 		  
 	  // create sleepable module
 	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
@@ -862,35 +882,71 @@ public:
 	    output_map[arg] = sleepInstance->getResult(idx);
 	  }
 
+	  // std::cerr << "output_map:\n";
+	  // for (auto [key, val] : output_map) {
+	  //   key.printAsOperand(llvm::errs(), asmState);
+	  //   std::cerr << " -> ";
+	  //   val.printAsOperand(llvm::errs(), asmState);
+	  //   std::cerr << "\n";
+	  // }
+
 	  // clone data ops into sleepable module
+	  //std::cerr << "cloning: \n";
 	  submoduleBuilder.setInsertionPoint(sleepModule.getBodyBlock()->getTerminator());
 	  for (auto &op : implModule.getBodyBlock()->getOperations()) {
 	    if (data_ops.contains(&op)) {
 	      auto newOp = submoduleBuilder.cloneWithoutRegions(op, valueMap);
 	      for (auto [idx, res] : llvm::enumerate(op.getResults())) {
+		// std::cerr << "result " << idx << ": ";
+		// res.printAsOperand(llvm::errs(), asmState);
+		// std::cerr << "\n";
 		if (output_args.contains(res)) {
+		  // std::cerr << "is output\n";
 		  int backedge_idx = arg_portId[res];
+		  // std::cerr << "backedge id: " << backedge_idx << "\n";
 		  auto output_backedge = bmap[backedge_idx];
+		  // std::cerr << "backedge: (cannot print)";
+		  //output_backedge.printAsOperand(llvm::errs(), asmState);
+		  // std::cerr << "\n";
 		  auto newop_res = newOp->getResult(idx);
+		  // std::cerr << "cloned result: ";
+		  // newop_res.printAsOperand(llvm::errs(), asmState);
+		  // std::cerr << "\n";
 		  output_backedge.setValue(newop_res);
+		  // std::cerr << "set backedge value\n";
 		}
 	      }
 	    }
 	  }
 
-	  // replace data op uses and erase
+	  // replace data op uses in always on partition
 	  for (auto res : output_args) {
+	    // std::cerr << "res: ";
+	    // res.printAsOperand(llvm::errs(), asmState);
+	    // std::cerr << "\nnew res: ";
+	    // output_map[res].printAsOperand(llvm::errs(), asmState);
+	    // std::cerr << "\n";
+	    // output_map[res].getDefiningOp()->print(llvm::errs());
+	    // std::cerr << "\n";
+	    
 	    res.replaceAllUsesWith(output_map[res]);
-	    res.getDefiningOp()->erase();
+
+	    // std::cerr << "erase: ";
+	    // res.getDefiningOp()->print(llvm::errs());
+	    // std::cerr << "\n";
+	    // res.getDefiningOp()->erase();
 	  }
 
-	  // get original out_valid and state transition inputs for wake signal before adding awake gates
-	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
-	  llvm::SmallVector<Value> inputs;
-	  llvm::SmallVector<std::string> bit_vectors;
-	  if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
-	    wakeHelper.getStateTransitionInputs(inputs, idleState, bit_vectors);
+	  // erase cloned data ops
+	  for (auto op: data_ops) {
+	    // std::cerr << "erase: ";
+	    // op->print(llvm::errs());
+	    // std::cerr << "\n";
+	    op->dropAllUses();
+	    op->erase();
 	  }
+
+	  
 	  
 	  // gate outputs with awake signal
 	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
@@ -932,7 +988,7 @@ public:
 	    for (auto input_bits : bit_vectors) {
       	      size_t bit_start = 0;
 	      llvm::SmallVector<Value> transitionInputOps;
-	      for (auto i : inputs) {
+	      for (auto i : state_transition_inputs) {
 		auto num_bits = i.getType().getIntOrFloatBitWidth();
 		std::string val = input_bits.substr(bit_start, num_bits);
 		Value inputValOp = s.constant(APInt(num_bits, StringRef(val), 2));

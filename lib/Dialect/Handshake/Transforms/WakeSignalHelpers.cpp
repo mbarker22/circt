@@ -68,9 +68,48 @@ namespace handshake {
       }
     }
   }
+
+  size_t getBitWidth(Value v) {
+    size_t ret = 0;
+    if (isa<hw::StructType>(v.getType())) {
+      auto structType = cast<hw::StructType>(v.getType());
+      llvm::SmallVector<Type> innerTypes;
+      structType.getInnerTypes(innerTypes);
+      for (auto t : innerTypes) {
+	ret += t.getIntOrFloatBitWidth();
+      }
+    } else {
+      ret += v.getType().getIntOrFloatBitWidth();
+    }
+    return ret;
+  }
+
+  static std::string valueName(Operation *scopeOp, Value v) {
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    // CAVEAT: Since commit 27df7158fe MLIR prefers verifiers to print errors for
+    // operations in generic form, and the printer by default runs a verification.
+    // `valueName` is used in some of these verifiers where preferably the generic
+    // operand form should be used instead.
+    AsmState asmState(scopeOp, OpPrintingFlags().assumeVerified());
+    v.printAsOperand(os, asmState);
+    return s;
+  }
+
+  static std::string netValueStr(WakeSignalHelper::netValue val) {
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    if (val.x) {
+      s = "x";
+    } else {
+      val.value.print(os, false);
+    }    
+    return s;
+  }
   
   bool WakeSignalHelper::findIdleState(llvm::DenseMap<Value, netValue> &idleState) {
     llvm::SmallVector<llvm::DenseMap<Value, netValue>> history;
+    int timeout = 0;
     while (true) {
       llvm::DenseMap<Value, netValue> stateMap;
       // simulate with no backpressure or valid input to find idle state
@@ -92,7 +131,6 @@ namespace handshake {
 	  // self edge - idle state found
 	  for (auto [key, val] : stateMap) {
 	    if (isa<seq::CompRegOp>(key.getDefiningOp()) && !val.x) {
-	      //std::cerr << "add reg to idle\n";
 	      idleState[key] = val;
 	    }
 	  }
@@ -103,12 +141,18 @@ namespace handshake {
 	}
       }
       history.push_back(stateMap);
+      timeout++;
+      if (timeout > 10) {
+	std::cerr << "Find idle state: simulation timeout\n";
+	return false;
+      }
     }	
   }
 
   void WakeSignalHelper::getStateTransitionInputs(llvm::SmallVector<Value> &inputs, llvm::DenseMap<Value, WakeSignalHelper::netValue> &state, llvm::SmallVector<std::string> &transition_bit_vectors) {
     llvm::SmallVector<Value> stack;
     llvm::SetVector<Value> visited;
+    // find inputs that drive state registers
     for (auto [key, val] : state) {
       if (!val.x) {
 	// don't worry about don't cares
@@ -145,12 +189,16 @@ namespace handshake {
 	}
       }
     }
+    // for (auto i : inputs) {
+    //   std::cerr << valueName(i.getDefiningOp()->getParentOp(), i) << " " << i.getType().getIntOrFloatBitWidth() << "\n";
+    // }
 
-    // all combinations of input bits
+    // all combinations of those input bits
     llvm::SmallVector<std::string> bit_vectors;
     size_t num_bits = 0;
     for (auto i : inputs) {
-      num_bits += i.getType().getIntOrFloatBitWidth();
+      //num_bits += i.getType().getIntOrFloatBitWidth();
+      num_bits += getBitWidth(i);
     }
     bit_vectors.push_back("0");
     bit_vectors.push_back("1");
@@ -167,6 +215,24 @@ namespace handshake {
       bit_vectors.append(update);
     }
 
+    // find all other inputs
+    llvm::SmallVector<Value> xInputs;
+    for (auto i : getInValid()) {
+      if (std::find(inputs.begin(), inputs.end(), i) == inputs.end()) {
+	xInputs.push_back(i);
+      }
+    }
+    for (auto i : getInData()) {
+      if (std::find(inputs.begin(), inputs.end(), i) == inputs.end()) {
+	xInputs.push_back(i);
+      }
+    }
+    for (auto i : getOutReady()) {
+      if (std::find(inputs.begin(), inputs.end(), i) == inputs.end()) {
+	xInputs.push_back(i);
+      }
+    }
+        
     // simulate to find inputs that transition out of idle state
     llvm::DenseMap<Value, WakeSignalHelper::netValue> prevStateMap;
     for (auto [key, value] : state) {
@@ -176,10 +242,16 @@ namespace handshake {
       llvm::DenseMap<Value, WakeSignalHelper::netValue> stateMap;
       size_t bit_start = 0;
       for (auto i : inputs) {
-	auto num_bits = i.getType().getIntOrFloatBitWidth();
+	//auto num_bits = i.getType().getIntOrFloatBitWidth();
+	auto num_bits = getBitWidth(i);
 	std::string val = input_bits.substr(bit_start, num_bits);
 	stateMap[i] = {false, APInt(num_bits, StringRef(val), 2)};
 	bit_start += num_bits;
+      }
+      //std::cerr << "set x inputs:\n";
+      for (auto i : xInputs) {
+	//std::cerr << valueName(i.getDefiningOp()->getParentOp(), i) << "\n";
+	stateMap[i] = {true, APInt(getBitWidth(i), 0)};
       }
       simulateOps(stateMap, prevStateMap);
       for (auto [key, val] : state) {
@@ -244,7 +316,7 @@ namespace handshake {
       }
     }
   }
-
+  
   void WakeSignalHelper::findTraverseOrder() {
     llvm::SetVector<Operation*> ordered;
     llvm::SmallVector<Operation*> stack;
@@ -286,26 +358,313 @@ namespace handshake {
   
   void WakeSignalHelper::simulateOps(llvm::DenseMap<Value, netValue> &stateMap, llvm::DenseMap<Value, netValue> &prevStateMap) {
     // TODO: more than 2 inputs
+    // TODO: don't cares
     for (auto &op : traverseOrder) {
-      if (isa<hw::ConstantOp>(op)) {
-	auto attr = op->getAttrOfType<mlir::IntegerAttr>("value");
-	stateMap[op->getResult(0)] = {false, attr.getValue()};
-      } else if (isa<seq::CompRegOp>(op)) {
-	if (prevStateMap.empty()) {
-	  stateMap[op->getResult(0)] = stateMap[op->getOperand(3)]; // initial value
-	} else {
-	  stateMap[op->getResult(0)] = prevStateMap[op->getOperand(0)]; // prev cycle value
-	} 
-      } else if (isa<comb::XorOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value ^ stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      } else if (isa<comb::AndOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value & stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      } else if (isa<comb::OrOp>(op)) {
-	auto res = stateMap[op->getOperand(0)].value | stateMap[op->getOperand(1)].value;
-	stateMap[op->getResult(0)] = {false, res};
-      } 
+      TypeSwitch<Operation*>(op)
+	.Case([&](hw::ConstantOp op) {
+	  //auto valAttr = op->getAttrOfType<mlir::IntegerAttr>("value");
+	  //auto value = op.getValue();
+	  stateMap[op->getResult(0)] = {false, op.getValue()};
+	})
+	.Case([&](seq::CompRegOp op) {
+	  if (prevStateMap.empty()) {
+	    stateMap[op->getResult(0)] = stateMap[op->getOperand(3)]; // initial value
+	  } else {
+	    stateMap[op->getResult(0)] = prevStateMap[op->getOperand(0)]; // prev cycle value
+	  }
+	})
+	.Case([&](comb::XorOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; // ^ stateMap[op->getOperand(1)].value;
+	  bool resX = stateMap[op->getOperand(0)].x; // | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	      if (stateMap[*operand].x) {
+		resX = true;
+		break;
+	      }
+	      resVal = resVal ^ stateMap[*operand].value;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::AndOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; 
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	    if (resX) {
+	      if (!stateMap[*operand].x && stateMap[*operand].value.isZero()) {
+		resX = false;
+		resVal = stateMap[*operand].value;
+	      }
+	    } else if (stateMap[*operand].x) {
+	      if (resVal.isOne()) {
+		resX = true;
+	      }
+	    } else {
+	      resVal = stateMap[op->getOperand(0)].value & stateMap[op->getOperand(1)].value;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::OrOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; 
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	    if (resX) {
+	      if (!stateMap[*operand].x && stateMap[*operand].value.isOne()) {
+		resX = false;
+		resVal = stateMap[*operand].value;
+	      }
+	    } else if (stateMap[*operand].x) {
+	      if (resVal.isZero()) {
+		resX = true;
+	      }
+	    } else {
+	      resVal = stateMap[op->getOperand(0)].value | stateMap[op->getOperand(1)].value;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::MuxOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  if (!resX) {
+	    if (stateMap[op->getOperand(0)].value == 1) {
+	      resVal = stateMap[op->getOperand(1)].value;
+	      resX = stateMap[op->getOperand(1)].x;
+	    } else {
+	      resVal = stateMap[op->getOperand(2)].value;
+	      resX = stateMap[op->getOperand(2)].x;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ICmpOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    switch(op.getPredicate()) { 
+	    case comb::ICmpPredicate::eq:
+	      resVal = (stateMap[op->getOperand(0)].value.eq(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::ne:
+	      resVal = (stateMap[op->getOperand(0)].value.ne(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::slt:
+	      resVal = (stateMap[op->getOperand(0)].value.slt(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::ult:
+	      resVal = (stateMap[op->getOperand(0)].value.ult(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::sle:
+	      resVal = (stateMap[op->getOperand(0)].value.sle(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::ule:
+	      resVal = (stateMap[op->getOperand(0)].value.ule(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::sgt:
+	      resVal = (stateMap[op->getOperand(0)].value.sgt(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::ugt:
+	      resVal = (stateMap[op->getOperand(0)].value.ugt(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::sge:
+	      resVal = (stateMap[op->getOperand(0)].value.sge(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    case comb::ICmpPredicate::uge:
+	      resVal = (stateMap[op->getOperand(0)].value.uge(stateMap[op->getOperand(1)].value)) ? (APInt(1, 1)) : (APInt(1, 0));
+	      break;
+	    default:
+	      std::cerr << "FIX: invalid icmp op\n";
+	      break;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ExtractOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  if (!resX) {
+	    auto extractFrom = stateMap[op->getOperand(0)].value;
+	    auto numBits = op->getResult(0).getType().getIntOrFloatBitWidth();
+	    auto lowBit = op.getLowBit();
+	    resVal = extractFrom.extractBits(numBits, lowBit);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ConcatOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; 
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  if (!resX) {
+	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	      if (stateMap[*operand].x) {
+		resX = true;
+		break;
+	      }
+	      resVal = resVal.concat(stateMap[*operand].value);
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ShlOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.shl(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ShrUOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.lshr(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ShrSOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.ashr(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ModSOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.srem(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::ModUOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.urem(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::DivUOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.udiv(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::DivSOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value.sdiv(stateMap[op->getOperand(1)].value);
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::SubOp op) {
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x | stateMap[op->getOperand(1)].x;
+	  if (!resX) {
+	    resVal = stateMap[op->getOperand(0)].value - stateMap[op->getOperand(1)].value;
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::AddOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; 
+	  bool resX = stateMap[op->getOperand(0)].x; 
+	  if (!resX) {
+	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	      if (stateMap[*operand].x) {
+		resX = true;
+		break;
+	      }
+	      resVal = resVal + stateMap[*operand].value;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](comb::MulOp op) {
+	  APInt resVal = stateMap[op->getOperand(0)].value; 
+	  bool resX = stateMap[op->getOperand(0)].x; 
+	  if (!resX) {
+	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	      if (stateMap[*operand].x) {
+		resX = true;
+		break;
+	      }
+	      resVal = resVal * stateMap[*operand].value;
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](hw::StructCreateOp op) {
+	  //std::cerr << "StructCreateOp: ";
+	  //op.print(llvm::errs());
+	  //std::cerr << "\n"; 
+	  APInt resVal = stateMap[op->getOperand(0)].value;
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  // if (resX) {
+	  //   std::cerr << "struct: X\n";
+	  // } else {
+	  //   std::cerr << "struct: ";
+	  //   resVal.print(llvm::errs(), false);
+	  //   std::cerr << "\n";
+	  // }
+	  if (!resX) {
+	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
+	      if (stateMap[*operand].x) {
+		resX = true;
+		//std::cerr << " struct: X";
+		break;
+	      }
+	      resVal = resVal.concat(stateMap[*operand].value);
+	      // std::cerr << "append: ";
+	      // stateMap[*operand].value.print(llvm::errs(), false);
+	      // std::cerr << " struct: ";
+	      // resVal.print(llvm::errs(), false);
+	      // std::cerr << "\n";
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
+	.Case([&](hw::StructExplodeOp op) {
+	  // std::cerr << "StructExplodeOp: ";
+	  //op.print(llvm::errs());
+	  //std::cerr << "\n";
+	  APInt resVal;
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  auto extractFrom = stateMap[op->getOperand(0)].value;
+	  // std::cerr << "input: ";
+	  // if (resX)
+	  //   std::cerr << "X\n";
+	  // else {
+	  //   extractFrom.print(llvm::errs(), false);
+	  //   std::cerr << " " << extractFrom.getBitWidth() << "\n";
+	  // }
+	  int lowBit = 0;
+	  for (auto res : op->getResults()) {
+	    //std::cerr << "output: ";
+	    if (resX) {
+	      //std::cerr << "X\n";
+	      stateMap[res] = {resX, resVal};
+	    } else {
+	      auto numBits = res.getType().getIntOrFloatBitWidth();
+	      //std::cerr << "extract " << numBits << " from " << lowBit << "\n";
+	      resVal = extractFrom.extractBits(numBits, lowBit);
+	      stateMap[res] = {resX, resVal};
+	      //resVal.print(llvm::errs(), false);
+	      //std::cerr << "\n";
+	      lowBit += numBits;
+	    }
+	  }
+	})
+	.Default([&](Operation* op) {
+	  if (!isa<hw::OutputOp>(op)) {
+	    std::cerr << "FIX: unknown op: " << op->getName().getStringRef().str() << "\n";
+	  }
+	});
+   
     }
   }
 

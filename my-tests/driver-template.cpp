@@ -1,4 +1,4 @@
-#include "Vtop.h"
+#include "VNAME.h"
 #include "verilated.h"
 #include <iostream>
 #include <fstream>
@@ -24,7 +24,7 @@ void getInputVector(std::string str, std::vector<int> &vec) {
   vec.push_back(stoi(str.substr(last)));
 }
 
-void acceptInput(CData &ready, CData &valid, QData &data, std::vector<int> &offered, std::vector<int> &accepted) {
+void acceptInput(CData ready, CData &valid, QData data, std::vector<int> &offered, std::vector<int> &accepted) {
   if (ready && valid) {
     accepted.push_back(data);
     offered.pop_back();
@@ -32,14 +32,14 @@ void acceptInput(CData &ready, CData &valid, QData &data, std::vector<int> &offe
   }
 }
 
-void recordOutput(CData &ready, CData &valid, QData &data, std::vector<int> &output) {
+void recordOutput(CData &ready, CData valid, QData data, std::vector<int> &output) {
   if (ready && valid) {
     output.push_back(data);
     ready = 0x0;
   }
 }
 
-void trace(std::ofstream &traceFile, CData &ready, CData &valid, QData &data) {
+void trace(std::ofstream &traceFile, CData ready, CData valid, QData data) {
   if (ready && valid) {
     traceFile << data << " ";
   } else {
@@ -56,7 +56,7 @@ void printResult(std::ofstream &outFile, std::vector<int> &vec) {
 int main(int argc, char **argv) {
 
   Verilated::commandArgs(argc, argv);
-  auto *tb = new Vtop;
+  auto *tb = new VNAME;
 
   // SETUP
   
