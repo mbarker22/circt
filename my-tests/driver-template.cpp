@@ -41,7 +41,7 @@ void recordOutput(CData &ready, CData valid, QData data, std::vector<int> &outpu
 
 void trace(std::ofstream &traceFile, CData ready, CData valid, QData data) {
   if (ready && valid) {
-    traceFile << data << " ";
+    traceFile << std::setw(2) << data << " ";
   } else {
     traceFile << "-- ";
   }
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
-  for ( ; main_time < 800 * 4; main_time++) {
+  for ( ; main_time < 1000 * 4; main_time++) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 

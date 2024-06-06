@@ -56,9 +56,7 @@ def setup(path, basename):
         if re.findall(r'handshake.func', line):
             inputs = [i for i in re.findall(r'%([0-9a-z]+?) *: ([0-9a-z]+)', line) if i[1] != "none"]
             if "->" in line:
-                outputs = [i for i in re.findall(r'([0-9a-z]+)', line.split("->")[1]) if i != "none"]
-                for i in range(len(outputs)):
-                    outputs[i] = ("out%d"%(i), outputs[i])                
+                outputs = [("out%s"%(idx), i) for [idx, i] in enumerate(re.findall(r'([0-9a-z]+)', line.split("->")[1])) if i != "none"]             
             else :
                 outputs = []
             
@@ -111,7 +109,7 @@ def setup(path, basename):
     input_arg = ""
     for i in inputs:
         bits = 64 if i[1] == "index" else int(i[1].split("i")[1])
-        input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(4)]
+        input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(100)]
         input_arg += ",".join(input_vals) + " "
     return input_arg
 
@@ -132,7 +130,6 @@ for test in tests:
     # lower to sv and run simulation
     run_success = [False, False]
     for mode in [0, 1]:
-    #for mode in [0]:
         print("power gated" if mode else "standard")
         if lower(test, basename, mode):
             run_success[mode] = run(basename, input_arg, mode)
