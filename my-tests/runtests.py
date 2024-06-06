@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-# expects an mlir input file with a single handshake.func op named top
+# expects an mlir input file with a single handshake.func op named test_basename
 
 import sys
 import subprocess
@@ -8,11 +8,6 @@ import re
 import random
 import os
 import shutil
-
-# assert len(sys.argv) == 2
-# path = sys.argv[1]
-# basename = os.path.basename(path).split('.')[0]
-# print("testing %s"%(path))
 
 if len(sys.argv) > 1 :
     tests = [sys.argv[1]]
@@ -37,7 +32,6 @@ def lower(path, basename, wake_signals):
     else:
         print("  lowering failed")
         return False
-        # exit()
 
 # run Verilator simulation
 def run(basename, inputs, wake_signals):
@@ -54,7 +48,6 @@ def run(basename, inputs, wake_signals):
         print(result.stdout)
         print(result.stderr)
         return False
-        # exit()
 
 def setup(path, basename):
 # get func op io
@@ -62,20 +55,10 @@ def setup(path, basename):
     for line in inputFile.readlines():
         if re.findall(r'handshake.func', line):
             inputs = [i for i in re.findall(r'%([0-9a-z]+?) *: ([0-9a-z]+)', line) if i[1] != "none"]
-            # inputs = re.findall(r'%(.*?): index', line)
-            # print(inputs)
-            #exit()
             if "->" in line:
-                # outputs = re.findall(r'index', line.split("->")[1])
                 outputs = [i for i in re.findall(r'([0-9a-z]+)', line.split("->")[1]) if i != "none"]
-                # output_line = line.split("->")[1]
-                # output_list = re.findall('-> \((.+)\) {', line)[0]
-                # outputs = output_list.split(", ")
-                # print(outputs)
-                #exit()
                 for i in range(len(outputs)):
-                    outputs[i] = ("out%d"%(i), outputs[i])
-                
+                    outputs[i] = ("out%d"%(i), outputs[i])                
             else :
                 outputs = []
             
@@ -92,22 +75,24 @@ def setup(path, basename):
     for o in outputs:
         template.insert(insertPoint, "std::vector<int> %s;\n"%(o[0]))
 
+    insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
+    for i in inputs:
+        template.insert(insertPoint, "acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0]))
+    for o in outputs:
+        template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
+        
     insertPoint = [idx for idx, line in enumerate(template) if re.search('INPUTS', line)][0]
     for i in inputs:
         template.insert(insertPoint, "tb->%s = (tb->%s_valid == 1) ? %s_offered.back() : 0;\n"%(i[0], i[0], i[0]))
         template.insert(insertPoint, "tb->%s_valid = (tb->%s_valid == 0) ? ((%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0) : (tb->%s_valid = 0x1);\n"%(i[0], i[0], i[0], i[0]))
-        # template.insert(insertPoint, "tb->%s = %s_offered.back();\nif (tb->%s_valid == 0) tb->%s_valid = (%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0;\n"%(i, i, i, i, i))
-        # template.insert(insertPoint, "tb->%s = %s_offered.back();\ntb->%s_valid = (%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0;\n"%(i, i, i, i))
     for o in outputs:
         template.insert(insertPoint, "tb->%s_ready = (tb->%s_ready == 0) ? (myrand() & 0x1) : (0x1);\n"%(o[0], o[0]))
-        # template.insert(insertPoint, "if (tb->%s_ready == 0) tb->%s_ready = myrand() & 0x1;\n"%(o, o))
-        # template.insert(insertPoint, "tb->%s_ready = myrand() & 0x1;\n"%(o))
 
-    insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
+    insertPoint = [idx for idx, line in enumerate(template) if re.search('TRACE', line)][0]
     for i in inputs:
-        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\nacceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0], i[0], i[0], i[0]))
+        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i[0], i[0], i[0]))
     for o in outputs:
-        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\nrecordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0], o[0], o[0], o[0]))
+        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o[0], o[0], o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
     for i in inputs:
@@ -141,9 +126,7 @@ def cleanup(basename):
 for test in tests:
     basename = os.path.basename(test).split('.')[0]
     print("testing %s %s"%(test, basename))
-    #cleanup(basename)
-    #continue
-    
+   
     input_arg = setup(test, basename)
 
     # lower to sv and run simulation

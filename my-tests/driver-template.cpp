@@ -43,7 +43,7 @@ void trace(std::ofstream &traceFile, CData ready, CData valid, QData data) {
   if (ready && valid) {
     traceFile << data << " ";
   } else {
-    traceFile << "- ";
+    traceFile << "-- ";
   }
 }
 
@@ -76,6 +76,9 @@ int main(int argc, char **argv) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 
+    case 1:
+      // HANDSHAKE
+      
     case 2:
       tb->clock = 0;
 
@@ -84,8 +87,8 @@ int main(int argc, char **argv) {
       break;
 
     case 3:
-      traceFile << std::dec << std::setw(5) << main_time << ' ' << std::hex;
-      // HANDSHAKE
+      traceFile << std::dec << std::setw(5) << main_time << ' ' << std::hex << std::setw(2);
+      // TRACE
 
       traceFile << std::endl;
       
