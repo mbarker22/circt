@@ -781,11 +781,15 @@ public:
           });
 
       if (ls.addWakeSignals) {
+	//std::cerr << "init wake helper\n";
 	WakeSignalHelper wakeHelper(implModule);
+
+	//std::cerr << "wake helper\n";
 
 	// find idle state, if it exists
 	llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
 	bool idleStateExists = wakeHelper.findIdleState(idleState);
+	//std::cerr << "found idle\n";
       
 	if (idleStateExists) {	  
 	  // get ops that can sleep in the idle state
@@ -794,6 +798,8 @@ public:
 	  llvm::SetVector<Value> output_args;
 	  wakeHelper.getDataOps(data_ops, input_args, output_args);
 
+	  //std::cerr << "found data ops\n";
+
 	  // find out_valid and state transition inputs for wake signal before modifying circuit
 	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
 	  llvm::SmallVector<Value> state_transition_inputs;
@@ -801,6 +807,8 @@ public:
 	  if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
 	    wakeHelper.getStateTransitionInputs(state_transition_inputs, idleState, bit_vectors);
 	  }
+
+	  //std::cerr << "found transition inputs\n";
 	  
 	  // std::cerr << "data ops:\n";
 	  // for (auto op: data_ops) {
@@ -838,7 +846,9 @@ public:
 	    arg_portId[arg] = idx;
 	  }
 	  output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
-	
+
+	  //std::cerr << "sleepable io ports\n";
+	  
 	  submoduleBuilder.setInsertionPoint(op->getParentOp());
 	  auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
 	    for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
@@ -865,13 +875,19 @@ public:
 	    }
 	  });
 
+	  //std::cerr << "create sleepable\n";
+
 	  // add clock and reset args
 	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
 	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
+
+	  //std::cerr << "update ports\n";
 	  
 	  // instantiate sleepable module
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	  auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
+
+	  //std::cerr << "instatiate sleepable\n";
 		
 	  IRMapping valueMap;
 	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
@@ -881,6 +897,8 @@ public:
 	  for (auto [idx, arg] : llvm::enumerate(output_args)) {
 	    output_map[arg] = sleepInstance->getResult(idx);
 	  }
+
+	  //std::cerr << "value maps\n";
 
 	  // std::cerr << "output_map:\n";
 	  // for (auto [key, val] : output_map) {
@@ -919,6 +937,8 @@ public:
 	    }
 	  }
 
+	  //std::cerr << "clone ops\n";
+
 	  // replace data op uses in always on partition
 	  for (auto res : output_args) {
 	    // std::cerr << "res: ";
@@ -937,6 +957,8 @@ public:
 	    // res.getDefiningOp()->erase();
 	  }
 
+	  //std::cerr << "replace uses\n";
+	  
 	  // erase cloned data ops
 	  for (auto op: data_ops) {
 	    // std::cerr << "erase: ";
@@ -946,8 +968,8 @@ public:
 	    op->erase();
 	  }
 
-	  
-	  
+	  //std::cerr << "erase orig data ops\n";
+	    
 	  // gate outputs with awake signal
 	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
@@ -961,6 +983,7 @@ public:
 	    ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
 	  }
 
+	  //std::cerr << "gate outputs\n";
 	 
 	  // define wake signal
 	  Value outValidOp;
@@ -987,6 +1010,8 @@ public:
 	    }
 	    Value idleOp = s.bAnd(idleStateOps, "idle");
 	    Value notIdleOp = s.bNot(idleOp);
+
+	    //std::cerr << "add idle state ops\n";
    
 	    // add idle state transition ops
 	    llvm::SmallVector<Value> transitionOps;
@@ -1004,11 +1029,14 @@ public:
 	      Value transitionOp = s.bAnd(transitionInputOps);
 	      transitionOps.push_back(transitionOp); 
 	    }
+
+	    //std::cerr << "add transition ops\n";
 	    
 	    Value stateChangeOp = s.bOr(transitionOps, "state_change");
 	    Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
 	    wake.setValue(wakeOp);
-	     
+
+	    //std::cerr << "set wake op\n";
 	  }
 	}
       }      

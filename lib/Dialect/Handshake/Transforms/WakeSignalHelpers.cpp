@@ -124,17 +124,31 @@ namespace handshake {
       if (!history.empty()) {
 	prevStateMap = history.back();
       }
-      simulateOps(stateMap, prevStateMap); 
-
+      simulateOps(stateMap, prevStateMap);
+      // std::cerr << "simulation cycle:\n";
+      // for (auto reg : module.getBodyBlock()->getOps<seq::CompRegOp>()) {
+      // 	reg->print(llvm::errs());
+      // 	std::cerr << " -> " << netValueStr(stateMap[reg]) << "\n";
+      // }
+      
       if (history.size() > 0) {
 	if (history.back() == stateMap) {
 	  // self edge - idle state found
+	  //std::cerr << "idle state:\n";
+	  int num_bits = 0;
 	  for (auto [key, val] : stateMap) {
 	    if (isa<seq::CompRegOp>(key.getDefiningOp()) && !val.x) {
+	      num_bits += getBitWidth(key);
 	      idleState[key] = val;
+	      //std::cerr << valueName(key.getDefiningOp()->getParentOp(), key) << " -> " << netValueStr(val) << "\n";
 	    }
 	  }
-	  return true;
+	  if (num_bits > 10) {
+	    //std::cerr << "too many bits\n";
+	    return false;
+	  } else {
+	    return true;
+	  }
 	} else if (std::find(history.begin(), history.end(), stateMap) != history.end()) {
 	  // cycle - no idle state
 	  return false;
@@ -153,16 +167,21 @@ namespace handshake {
     llvm::SmallVector<Value> stack;
     llvm::SetVector<Value> visited;
     // find inputs that drive state registers
+    //std::cerr << "starting vals:\n";
     for (auto [key, val] : state) {
       if (!val.x) {
 	// don't worry about don't cares
 	stack.push_back(key.getDefiningOp()->getOperand(0));
 	stack.push_back(key.getDefiningOp()->getOperand(3));
+	//std::cerr << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << "\n" << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << "\n";
       }
     }
 
     while (!stack.empty()) {
       auto net = stack.back();
+      // std::cerr << "net: " << valueName(net.getDefiningOp()->getParentOp(), net) << "\n";
+      // net.getDefiningOp()->print(llvm::errs());
+      // std::cerr << "\n";
       stack.pop_back();
       visited.insert(net);
 		  
@@ -189,6 +208,7 @@ namespace handshake {
 	}
       }
     }
+    // std::cerr << "transition inputs\n";
     // for (auto i : inputs) {
     //   std::cerr << valueName(i.getDefiningOp()->getParentOp(), i) << " " << i.getType().getIntOrFloatBitWidth() << "\n";
     // }
@@ -200,6 +220,10 @@ namespace handshake {
       //num_bits += i.getType().getIntOrFloatBitWidth();
       num_bits += getBitWidth(i);
     }
+    //std::cerr << "total input bits: " << num_bits << "\n";
+
+    assert(num_bits < 10 && "Too many input bits to simulate");
+    
     bit_vectors.push_back("0");
     bit_vectors.push_back("1");
     for (size_t i = 0; i < num_bits-1; i++) {
@@ -214,6 +238,8 @@ namespace handshake {
       }
       bit_vectors.append(update);
     }
+
+    //std::cerr << "bit vectors\n";
 
     // find all other inputs
     llvm::SmallVector<Value> xInputs;
@@ -232,13 +258,16 @@ namespace handshake {
 	xInputs.push_back(i);
       }
     }
-        
+
+    //std::cerr << "don't care inputs\n";
+    
     // simulate to find inputs that transition out of idle state
     llvm::DenseMap<Value, WakeSignalHelper::netValue> prevStateMap;
     for (auto [key, value] : state) {
       prevStateMap[key.getDefiningOp()->getOperand(0)] = value;
     }
     for (auto input_bits : bit_vectors) {
+      //std::cerr << "simulate " << input_bits << "\n";
       llvm::DenseMap<Value, WakeSignalHelper::netValue> stateMap;
       size_t bit_start = 0;
       for (auto i : inputs) {
@@ -360,6 +389,8 @@ namespace handshake {
     // TODO: more than 2 inputs
     // TODO: don't cares
     for (auto &op : traverseOrder) {
+      // op->print(llvm::errs());
+      // std::cerr << "\n";
       TypeSwitch<Operation*>(op)
 	.Case([&](hw::ConstantOp op) {
 	  //auto valAttr = op->getAttrOfType<mlir::IntegerAttr>("value");
