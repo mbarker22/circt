@@ -798,249 +798,253 @@ public:
 	  llvm::SetVector<Value> output_args;
 	  wakeHelper.getDataOps(data_ops, input_args, output_args);
 
-	  //std::cerr << "found data ops\n";
+	  //std::cerr << "found data ops: " << data_ops.size() << "\n";;
 
-	  // find out_valid and state transition inputs for wake signal before modifying circuit
-	  llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
-	  llvm::SmallVector<Value> state_transition_inputs;
-	  llvm::SmallVector<std::string> bit_vectors;
-	  if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
-	    wakeHelper.getStateTransitionInputs(state_transition_inputs, idleState, bit_vectors);
-	  }
-
-	  //std::cerr << "found transition inputs\n";
-	  
-	  // std::cerr << "data ops:\n";
-	  // for (auto op: data_ops) {
-	  //   op->print(llvm::errs());
-	  //   std::cerr << "\n";
-	  // }
-	  // std::cerr << "output args:\n";
-	  // AsmState asmState(implModule, OpPrintingFlags().assumeVerified());
-	  // for (auto arg: output_args) {
-	  //   arg.printAsOperand(llvm::errs(), asmState);
-	  //   std::cerr << "\n";
-	  // }
-		  
-	  // create sleepable module
-	  BackedgeBuilder bb(submoduleBuilder, op.getLoc());
-	  std::map<int, Backedge> bmap;
-	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
-	  auto wake = bb.get(IntegerType::get(op->getContext(), 1));
-	  input_args.push_back(wake);
-
-	  SmallVector<hw::PortInfo> input_ports, output_ports;
-	  llvm::DenseMap<Value, int> arg_portId;
-	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
-	    if (idx == input_args.size()-1) {
-	      // last input arg is wake
-	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "wake"), arg.getType(), ModulePort::Direction::Input}, idx++});
-	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()), hw::ModulePort::Direction::Input}, idx++});
-	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "reset"), IntegerType::get(op->getContext(), 1), hw::ModulePort::Direction::Input}, idx});
-	      break;
+	  if (!data_ops.empty()) {
+	    // find out_valid and state transition inputs for wake signal before modifying circuit
+	    llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
+	    llvm::SmallVector<Value> state_transition_inputs;
+	    llvm::SmallVector<std::string> bit_vectors;
+	    if (!implModule.getBodyBlock()->getOps<seq::CompRegOp>().empty()) {
+	      wakeHelper.getStateTransitionInputs(state_transition_inputs, idleState, bit_vectors);
 	    }
-	    input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "in" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Input}, idx});
-	  }
-	  for (auto [idx, arg] : llvm::enumerate(output_args)) {
-	    output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "out" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Output}, idx});
-	    arg_portId[arg] = idx;
-	  }
-	  output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
 
-	  //std::cerr << "sleepable io ports\n";
+	    //std::cerr << "found transition inputs\n";
 	  
-	  submoduleBuilder.setInsertionPoint(op->getParentOp());
-	  auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
-	    for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
-	      if (idx == ports.getPortList().sizeOutputs()-1) {
-		// last output is awake
-		// add ops to insert a random wake time
-		int width = 8;
-		int rand_int = rand() % 16;
-		RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
-		auto delayConst = s.constant(width, rand_int);
-		auto delay = bb.get(IntegerType::get(op->getContext(), width));
-		auto delayReg = s.reg("delay", delay, delayConst);
-		auto delayEqZero = s.bNot(s.rOr(delayReg));
-		auto decDelay = s.sub(delayReg, s.constant(width, 1));
-		auto selectHoldOrDec = s.mux(delayEqZero, {decDelay, delayReg});
-		auto selectWakeOrReset = s.mux(ports.getInput("wake"), {delayConst, selectHoldOrDec});
-		delay.setValue(selectWakeOrReset);
-		ports.setOutput(port.name, s.bAnd({ports.getInput("wake"), delayEqZero}));
+	    // std::cerr << "data ops:\n";
+	    // for (auto op: data_ops) {
+	    //   op->print(llvm::errs());
+	    //   std::cerr << "\n";
+	    // }
+	    // std::cerr << "output args:\n";
+	    // AsmState asmState(implModule, OpPrintingFlags().assumeVerified());
+	    // for (auto arg: output_args) {
+	    //   arg.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << "\n";
+	    // }
+		  
+	    // create sleepable module
+	    BackedgeBuilder bb(submoduleBuilder, op.getLoc());
+	    std::map<int, Backedge> bmap;
+	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	    auto wake = bb.get(IntegerType::get(op->getContext(), 1));
+	    input_args.push_back(wake);
+
+	    SmallVector<hw::PortInfo> input_ports, output_ports;
+	    llvm::DenseMap<Value, int> arg_portId;
+	    for (auto [idx, arg] : llvm::enumerate(input_args)) {
+	      if (idx == input_args.size()-1) {
+		// last input arg is wake
+		input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "wake"), arg.getType(), ModulePort::Direction::Input}, idx++});
+		input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "clock"), seq::ClockType::get(op->getContext()), hw::ModulePort::Direction::Input}, idx++});
+		input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "reset"), IntegerType::get(op->getContext(), 1), hw::ModulePort::Direction::Input}, idx});
 		break;
 	      }
-	      auto backedge = bb.get(port.type);
-	      ports.setOutput(port.name, backedge);
-	      bmap[idx] = backedge;
+	      input_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "in" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Input}, idx});
 	    }
-	  });
+	    for (auto [idx, arg] : llvm::enumerate(output_args)) {
+	      output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "out" + std::to_string(idx)), arg.getType(), ModulePort::Direction::Output}, idx});
+	      arg_portId[arg] = idx;
+	    }
+	    output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
 
-	  //std::cerr << "create sleepable\n";
-
-	  // add clock and reset args
-	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
-	  input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
-
-	  //std::cerr << "update ports\n";
+	    //std::cerr << "sleepable io ports\n";
 	  
-	  // instantiate sleepable module
-	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
-	  auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
+	    submoduleBuilder.setInsertionPoint(op->getParentOp());
+	    auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
+	      for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
+		if (idx == ports.getPortList().sizeOutputs()-1) {
+		  // last output is awake
+		  // add ops to insert a random wake time
+		  int width = 8;
+		  int rand_int = rand() % 16;
+		  RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
+		  auto delayConst = s.constant(width, rand_int);
+		  auto delay = bb.get(IntegerType::get(op->getContext(), width));
+		  auto delayReg = s.reg("delay", delay, delayConst);
+		  auto delayEqZero = s.bNot(s.rOr(delayReg));
+		  auto decDelay = s.sub(delayReg, s.constant(width, 1));
+		  auto selectHoldOrDec = s.mux(delayEqZero, {decDelay, delayReg});
+		  auto selectWakeOrReset = s.mux(ports.getInput("wake"), {delayConst, selectHoldOrDec});
+		  delay.setValue(selectWakeOrReset);
+		  ports.setOutput(port.name, s.bAnd({ports.getInput("wake"), delayEqZero}));
+		  break;
+		}
+		auto backedge = bb.get(port.type);
+		ports.setOutput(port.name, backedge);
+		bmap[idx] = backedge;
+	      }
+	    });
 
-	  //std::cerr << "instatiate sleepable\n";
+	    //std::cerr << "create sleepable\n";
+
+	    // add clock and reset args
+	    input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
+	    input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
+
+	    //std::cerr << "update ports\n";
+	  
+	    // instantiate sleepable module
+	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	    auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
+
+	    //std::cerr << "instatiate sleepable\n";
 		
-	  IRMapping valueMap;
-	  for (auto [idx, arg] : llvm::enumerate(input_args)) {
-	    valueMap.map(arg, sleepModule.getBodyBlock()->getArguments()[idx]);
-	  }
-	  llvm::DenseMap<Value, Value> output_map;
-	  for (auto [idx, arg] : llvm::enumerate(output_args)) {
-	    output_map[arg] = sleepInstance->getResult(idx);
-	  }
+	    IRMapping valueMap;
+	    for (auto [idx, arg] : llvm::enumerate(input_args)) {
+	      valueMap.map(arg, sleepModule.getBodyBlock()->getArguments()[idx]);
+	    }
+	    llvm::DenseMap<Value, Value> output_map;
+	    for (auto [idx, arg] : llvm::enumerate(output_args)) {
+	      output_map[arg] = sleepInstance->getResult(idx);
+	    }
 
-	  //std::cerr << "value maps\n";
+	    //std::cerr << "value maps\n";
 
-	  // std::cerr << "output_map:\n";
-	  // for (auto [key, val] : output_map) {
-	  //   key.printAsOperand(llvm::errs(), asmState);
-	  //   std::cerr << " -> ";
-	  //   val.printAsOperand(llvm::errs(), asmState);
-	  //   std::cerr << "\n";
-	  // }
+	    // std::cerr << "output_map:\n";
+	    // for (auto [key, val] : output_map) {
+	    //   key.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << " -> ";
+	    //   val.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << "\n";
+	    // }
 
-	  // clone data ops into sleepable module
-	  //std::cerr << "cloning: \n";
-	  submoduleBuilder.setInsertionPoint(sleepModule.getBodyBlock()->getTerminator());
-	  for (auto &op : implModule.getBodyBlock()->getOperations()) {
-	    if (data_ops.contains(&op)) {
-	      auto newOp = submoduleBuilder.cloneWithoutRegions(op, valueMap);
-	      for (auto [idx, res] : llvm::enumerate(op.getResults())) {
-		// std::cerr << "result " << idx << ": ";
-		// res.printAsOperand(llvm::errs(), asmState);
-		// std::cerr << "\n";
-		if (output_args.contains(res)) {
-		  // std::cerr << "is output\n";
-		  int backedge_idx = arg_portId[res];
-		  // std::cerr << "backedge id: " << backedge_idx << "\n";
-		  auto output_backedge = bmap[backedge_idx];
-		  // std::cerr << "backedge: (cannot print)";
-		  //output_backedge.printAsOperand(llvm::errs(), asmState);
+	    // clone data ops into sleepable module
+	    //std::cerr << "cloning: \n";
+	    submoduleBuilder.setInsertionPoint(sleepModule.getBodyBlock()->getTerminator());
+	    for (auto &op : implModule.getBodyBlock()->getOperations()) {
+	      if (data_ops.contains(&op)) {
+		auto newOp = submoduleBuilder.cloneWithoutRegions(op, valueMap);
+		for (auto [idx, res] : llvm::enumerate(op.getResults())) {
+		  // std::cerr << "result " << idx << ": ";
+		  // res.printAsOperand(llvm::errs(), asmState);
 		  // std::cerr << "\n";
-		  auto newop_res = newOp->getResult(idx);
-		  // std::cerr << "cloned result: ";
-		  // newop_res.printAsOperand(llvm::errs(), asmState);
-		  // std::cerr << "\n";
-		  output_backedge.setValue(newop_res);
-		  // std::cerr << "set backedge value\n";
+		  if (output_args.contains(res)) {
+		    // std::cerr << "is output\n";
+		    int backedge_idx = arg_portId[res];
+		    // std::cerr << "backedge id: " << backedge_idx << "\n";
+		    auto output_backedge = bmap[backedge_idx];
+		    // std::cerr << "backedge: (cannot print)";
+		    //output_backedge.printAsOperand(llvm::errs(), asmState);
+		    // std::cerr << "\n";
+		    auto newop_res = newOp->getResult(idx);
+		    // std::cerr << "cloned result: ";
+		    // newop_res.printAsOperand(llvm::errs(), asmState);
+		    // std::cerr << "\n";
+		    output_backedge.setValue(newop_res);
+		    // std::cerr << "set backedge value\n";
+		  }
 		}
 	      }
 	    }
-	  }
 
-	  //std::cerr << "clone ops\n";
+	    //std::cerr << "clone ops\n";
 
-	  // replace data op uses in always on partition
-	  for (auto res : output_args) {
-	    // std::cerr << "res: ";
-	    // res.printAsOperand(llvm::errs(), asmState);
-	    // std::cerr << "\nnew res: ";
-	    // output_map[res].printAsOperand(llvm::errs(), asmState);
-	    // std::cerr << "\n";
-	    // output_map[res].getDefiningOp()->print(llvm::errs());
-	    // std::cerr << "\n";
+	    // replace data op uses in always on partition
+	    for (auto res : output_args) {
+	      // std::cerr << "res: ";
+	      // res.printAsOperand(llvm::errs(), asmState);
+	      // std::cerr << "\nnew res: ";
+	      // output_map[res].printAsOperand(llvm::errs(), asmState);
+	      // std::cerr << "\n";
+	      // output_map[res].getDefiningOp()->print(llvm::errs());
+	      // std::cerr << "\n";
 	    
-	    res.replaceAllUsesWith(output_map[res]);
+	      res.replaceAllUsesWith(output_map[res]);
 
-	    // std::cerr << "erase: ";
-	    // res.getDefiningOp()->print(llvm::errs());
-	    // std::cerr << "\n";
-	    // res.getDefiningOp()->erase();
-	  }
+	      // std::cerr << "erase: ";
+	      // res.getDefiningOp()->print(llvm::errs());
+	      // std::cerr << "\n";
+	      // res.getDefiningOp()->erase();
+	    }
 
-	  //std::cerr << "replace uses\n";
+	    //std::cerr << "replace uses\n";
 	  
-	  // erase cloned data ops
-	  for (auto op: data_ops) {
-	    // std::cerr << "erase: ";
-	    // op->print(llvm::errs());
-	    // std::cerr << "\n";
-	    op->dropAllUses();
-	    op->erase();
-	  }
+	    // erase cloned data ops
+	    for (auto op: data_ops) {
+	      // std::cerr << "erase: ";
+	      // op->print(llvm::errs());
+	      // std::cerr << "\n";
+	      op->dropAllUses();
+	      op->erase();
+	    }
 
-	  //std::cerr << "erase orig data ops\n";
+	    //std::cerr << "erase orig data ops\n";
 	    
-	  // gate outputs with awake signal
-	  RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
-	  submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
-	  auto awake = sleepInstance->getResults().back();
-	  for (auto valid : wakeHelper.getOutValid()) {
-	    auto validAndAwake = s.bAnd({valid, awake});
-	    valid.replaceAllUsesExcept(validAndAwake, validAndAwake.getDefiningOp());
-	  }	
-	  for (auto ready : wakeHelper.getInReady()) {
-	    auto readyAndAwake = s.bAnd({ready, awake});
-	    ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
-	  }
+	    // gate outputs with awake signal
+	    RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
+	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
+	    auto awake = sleepInstance->getResults().back();
+	    for (auto valid : wakeHelper.getOutValid()) {
+	      auto validAndAwake = s.bAnd({valid, awake});
+	      valid.replaceAllUsesExcept(validAndAwake, validAndAwake.getDefiningOp());
+	    }	
+	    for (auto ready : wakeHelper.getInReady()) {
+	      auto readyAndAwake = s.bAnd({ready, awake});
+	      ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
+	    }
 
-	  //std::cerr << "gate outputs\n";
+	    //std::cerr << "gate outputs\n";
 	 
-	  // define wake signal
-	  Value outValidOp;
-	  if (out_valid.size() == 1)
-	    outValidOp = out_valid[0];
-	  else if (out_valid.size() > 1)
-	    outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
- 	  auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
-	  if (regOps.empty()) {
-	    if (isa<SinkOp>(op)) {
-	      wake.setValue(wakeHelper.getInReady()[0]);
-	    } else {
+	    // define wake signal
+	    Value outValidOp;
+	    if (out_valid.size() == 1)
+	      outValidOp = out_valid[0];
+	    else if (out_valid.size() > 1)
+	      outValidOp = s.bOr(ValueRange(out_valid.getArrayRef()), "out_valid");
+	    else
+	      std::cerr << "no valid outputs\n";
+	    auto regOps = implModule.getBodyBlock()->getOps<seq::CompRegOp>();
+	    if (regOps.empty()) {
 	      wake.setValue(outValidOp);
+	    } else {
+	      // add idle state ops
+	      llvm::SmallVector<Value> idleStateOps;
+	      for (auto [key, val] : idleState) {
+		if (!val.x) {
+		  auto idleValOp = s.constant(val.value);
+		  auto idleCmpOp = s.cmp(key, idleValOp, comb::ICmpPredicate::eq);
+		  idleStateOps.push_back(idleCmpOp);
+		}
+	      }
+	      Value idleOp = s.bAnd(idleStateOps, "idle");
+	      Value notIdleOp = s.bNot(idleOp);
+
+	      //std::cerr << "add idle state ops\n";
+   
+	      // add idle state transition ops
+	      llvm::SmallVector<Value> transitionOps;
+	      for (auto input_bits : bit_vectors) {
+		size_t bit_start = 0;
+		llvm::SmallVector<Value> transitionInputOps;
+		for (auto i : state_transition_inputs) {
+		  auto num_bits = i.getType().getIntOrFloatBitWidth();
+		  std::string val = input_bits.substr(bit_start, num_bits);
+		  Value inputValOp = s.constant(APInt(num_bits, StringRef(val), 2));
+		  Value inputCmpOp = s.cmp(i, inputValOp, comb::ICmpPredicate::eq);
+		  transitionInputOps.push_back(inputCmpOp);
+		  bit_start += num_bits;
+		}
+		Value transitionOp = s.bAnd(transitionInputOps);
+		transitionOps.push_back(transitionOp); 
+	      }
+
+	      //std::cerr << "add transition ops\n";
+	    
+	      Value stateChangeOp = s.bOr(transitionOps, "state_change");
+	      Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
+	      wake.setValue(wakeOp);
+
+	      //std::cerr << "set wake op\n";
 	    }
 	  } else {
-	    // add idle state ops
-	    llvm::SmallVector<Value> idleStateOps;
-	    for (auto [key, val] : idleState) {
-	      if (!val.x) {
-        	auto idleValOp = s.constant(val.value);
-		auto idleCmpOp = s.cmp(key, idleValOp, comb::ICmpPredicate::eq);
-		idleStateOps.push_back(idleCmpOp);
-	      }
-	    }
-	    Value idleOp = s.bAnd(idleStateOps, "idle");
-	    Value notIdleOp = s.bNot(idleOp);
-
-	    //std::cerr << "add idle state ops\n";
-   
-	    // add idle state transition ops
-	    llvm::SmallVector<Value> transitionOps;
-	    for (auto input_bits : bit_vectors) {
-      	      size_t bit_start = 0;
-	      llvm::SmallVector<Value> transitionInputOps;
-	      for (auto i : state_transition_inputs) {
-		auto num_bits = i.getType().getIntOrFloatBitWidth();
-		std::string val = input_bits.substr(bit_start, num_bits);
-		Value inputValOp = s.constant(APInt(num_bits, StringRef(val), 2));
-		Value inputCmpOp = s.cmp(i, inputValOp, comb::ICmpPredicate::eq);
-		transitionInputOps.push_back(inputCmpOp);
-		bit_start += num_bits;
-	      }
-	      Value transitionOp = s.bAnd(transitionInputOps);
-	      transitionOps.push_back(transitionOp); 
-	    }
-
-	    //std::cerr << "add transition ops\n";
-	    
-	    Value stateChangeOp = s.bOr(transitionOps, "state_change");
-	    Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
-	    wake.setValue(wakeOp);
-
-	    //std::cerr << "set wake op\n";
-	  }
+	    std::cerr << "NO DATA OPS\n";
+	  } 
+	} else {
+	  std::cerr << "NO IDLE STATE\n";
 	}
-      }      
-    }
+      } 
+    } 
     
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
