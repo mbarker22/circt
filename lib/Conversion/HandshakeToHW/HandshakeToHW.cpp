@@ -798,6 +798,13 @@ public:
 	  llvm::SetVector<Value> output_args;
 	  wakeHelper.getDataOps(data_ops, input_args, output_args);
 
+	  // any idle state registers in data plane need to be output from sleepable
+	  for (auto [key, val] : idleState) {
+	    if (data_ops.contains(key.getDefiningOp()) && !val.x) {
+	      output_args.insert(key.getDefiningOp()->getResult(0));
+	    }
+	  }
+
 	  //std::cerr << "found data ops: " << data_ops.size() << "\n";;
 
 	  if (!data_ops.empty()) {
@@ -817,7 +824,7 @@ public:
 	    //   std::cerr << "\n";
 	    // }
 	    // std::cerr << "output args:\n";
-	    // AsmState asmState(implModule, OpPrintingFlags().assumeVerified());
+	    AsmState asmState(implModule, OpPrintingFlags().assumeVerified());
 	    // for (auto arg: output_args) {
 	    //   arg.printAsOperand(llvm::errs(), asmState);
 	    //   std::cerr << "\n";
@@ -901,6 +908,14 @@ public:
 
 	    //std::cerr << "value maps\n";
 
+	    // std::cerr << "valueMap:\n";
+	    // for (auto [key, val] : valueMap.getValueMap()) {
+	    //   key.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << " -> ";
+	    //   val.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << "\n";
+	    // }
+
 	    // std::cerr << "output_map:\n";
 	    // for (auto [key, val] : output_map) {
 	    //   key.printAsOperand(llvm::errs(), asmState);
@@ -911,10 +926,29 @@ public:
 
 	    // clone data ops into sleepable module
 	    //std::cerr << "cloning: \n";
+	    llvm::DenseMap<Operation*, llvm::SmallVector<int>> oooArgs;
 	    submoduleBuilder.setInsertionPoint(sleepModule.getBodyBlock()->getTerminator());
 	    for (auto &op : implModule.getBodyBlock()->getOperations()) {
 	      if (data_ops.contains(&op)) {
+		//std::cerr << "old op: ";
+		//op.print(llvm::errs());
 		auto newOp = submoduleBuilder.cloneWithoutRegions(op, valueMap);
+		//std::cerr << "\nnew op: ";
+		//newOp->print(llvm::errs());
+		//std::cerr << "\n";
+		llvm::SmallVector<int> args;
+		for (auto [idx, arg] : llvm::enumerate(op.getOperands())) {
+		  //auto modOp = arg.getDefiningOp()->getParentOfType<hw::HWModuleOp>();
+		  //auto parent = cast<hw::HWModuleOp>(arg.getDefiningOp()->getParentOp());
+		  if (!valueMap.contains(arg)) {
+		    //std::cerr << "value map missing arg " << idx << "\n";
+		    //oooArgs.push_back(arg);
+		    //oooArgs[newOp].push_back(idx);
+		    args.push_back(idx);
+		  }
+		}
+		if (!args.empty())
+		  oooArgs[newOp] = args;
 		for (auto [idx, res] : llvm::enumerate(op.getResults())) {
 		  // std::cerr << "result " << idx << ": ";
 		  // res.printAsOperand(llvm::errs(), asmState);
@@ -938,6 +972,13 @@ public:
 	      }
 	    }
 
+	    // update out of order args
+	    for (auto [key, val] : oooArgs) {
+	      for (auto idx : val) {
+		key->setOperand(idx, valueMap.lookup(key->getOperand(idx)));
+	      }
+	    }
+
 	    //std::cerr << "clone ops\n";
 
 	    // replace data op uses in always on partition
@@ -951,12 +992,26 @@ public:
 	      // std::cerr << "\n";
 	    
 	      res.replaceAllUsesWith(output_map[res]);
+	      //res.replaceAllUsesExcept(output_map[res], sleepModule);
 
+	      // replace any idleState registers in map
+	      if (isa<seq::CompRegOp>(res.getDefiningOp())) {
+		idleState[output_map[res]] = idleState[res];
+		idleState.erase(res);
+	      }
+
+	      
 	      // std::cerr << "erase: ";
 	      // res.getDefiningOp()->print(llvm::errs());
 	      // std::cerr << "\n";
 	      // res.getDefiningOp()->erase();
 	    }
+
+	    // std::cerr << "idle state:\n";
+	    // for (auto [key, val]: idleState) {
+	    //   key.printAsOperand(llvm::errs(), asmState);
+	    //   std::cerr << "\n";
+	    // }
 
 	    //std::cerr << "replace uses\n";
 	  
@@ -965,6 +1020,12 @@ public:
 	      // std::cerr << "erase: ";
 	      // op->print(llvm::errs());
 	      // std::cerr << "\n";
+	      if (isa<seq::CompRegOp>(op) && idleState.contains(op->getResult(0))) {
+		//if (idleState[op->getResult(0)].x) std::cerr << "data register is x\n";
+	       	//else std::cerr << "data register is not x\n";
+	       	assert (idleState[op->getResult(0)].x && "Expect data registers to be X in idle state or replaced by instance output");
+	       	idleState.erase(op->getResult(0));
+	      }
 	      op->dropAllUses();
 	      op->erase();
 	    }
@@ -985,6 +1046,7 @@ public:
 	    }
 
 	    //std::cerr << "gate outputs\n";
+	    // AsmState asmState(implModule->getParentOp(), OpPrintingFlags().assumeVerified());
 	 
 	    // define wake signal
 	    Value outValidOp;
@@ -1000,16 +1062,31 @@ public:
 	    } else {
 	      // add idle state ops
 	      llvm::SmallVector<Value> idleStateOps;
+	      //std::cerr << "idle state size: " << idleState.size() << "\n";
 	      for (auto [key, val] : idleState) {
+		//key.getDefiningOp()->print(llvm::errs());
+		//std::cerr << "\n";
+		//key.printAsOperand(llvm::errs(), asmState);
+		//std::cerr << " = ";
+		//if (!val.x) val.value.print(llvm::errs(), false);
+		//std::cerr << " " << (val.x ? ("") : (std::to_string(val.value.getBitWidth()))) << "\n";
+		
 		if (!val.x) {
+		  //std::cerr << "not x\n";
 		  auto idleValOp = s.constant(val.value);
+		  //std::cerr << "created constant op\n";
 		  auto idleCmpOp = s.cmp(key, idleValOp, comb::ICmpPredicate::eq);
+       		  //std::cerr << "created compare op\n";
 		  idleStateOps.push_back(idleCmpOp);
 		}
 	      }
+	      
+	      // if asleep, idle is true
 	      Value idleOp = s.bAnd(idleStateOps, "idle");
+	      //Value awakeReg = s.reg("awake", awake, s.constant(APInt(1, 1)));
+	      //Value idleOp = s.mux(awakeReg, {s.constant(APInt(1, 1)), idleOpAwake});
 	      Value notIdleOp = s.bNot(idleOp);
-
+				   
 	      //std::cerr << "add idle state ops\n";
    
 	      // add idle state transition ops

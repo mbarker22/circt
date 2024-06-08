@@ -116,7 +116,7 @@ namespace handshake {
       for (auto i : getOutReady())
 	stateMap[i] = {false, APInt(1, 1)};
       for (auto i : getInData())
-	stateMap[i] = {true, APInt(1, 1)};
+	stateMap[i] = {true, APInt(getBitWidth(i), 0)};
       for (auto i : getInValid())
 	stateMap[i] = {false, APInt(1, 0)};
       
@@ -135,20 +135,20 @@ namespace handshake {
 	if (history.back() == stateMap) {
 	  // self edge - idle state found
 	  //std::cerr << "idle state:\n";
-	  int num_bits = 0;
+	  //int num_bits = 0;
 	  for (auto [key, val] : stateMap) {
-	    if (isa<seq::CompRegOp>(key.getDefiningOp()) && !val.x) {
-	      num_bits += getBitWidth(key);
+	    if (isa<seq::CompRegOp>(key.getDefiningOp())) { // && !val.x) {
+	      //num_bits += getBitWidth(key);
 	      idleState[key] = val;
 	      //std::cerr << valueName(key.getDefiningOp()->getParentOp(), key) << " -> " << netValueStr(val) << "\n";
 	    }
 	  }
-	  if (num_bits > 10) {
+	  //if (num_bits > 10) {
 	    //std::cerr << "too many bits\n";
-	    return false;
-	  } else {
-	    return true;
-	  }
+	    //return false;
+	  //} else {
+	  return true;
+	  // }
 	} else if (std::find(history.begin(), history.end(), stateMap) != history.end()) {
 	  // cycle - no idle state
 	  return false;
@@ -186,14 +186,18 @@ namespace handshake {
       visited.insert(net);
 		  
       if (isa<BlockArgument>(net)) {
-	inputs.push_back(net);
+	if (!getInData().contains(net) && std::find(inputs.begin(), inputs.end(), net) == inputs.end()) {
+	  inputs.push_back(net);
+	}
       } else {
 	auto op = net.getDefiningOp();
 	if (isa<esi::WrapValidReadyOp>(op) || isa<esi::UnwrapValidReadyOp>(op)) {
 	  // handshake inputs
 	  for (auto result : op->getResults()) {
 	    if (result == net) {
-	      inputs.push_back(result);
+	      if (!getInData().contains(net) && std::find(inputs.begin(), inputs.end(), net) == inputs.end()) {
+		inputs.push_back(result);
+	      }
 	    }
 	  }
 	} else if (isa<seq::CompRegOp>(op)) {
@@ -218,10 +222,12 @@ namespace handshake {
     size_t num_bits = 0;
     for (auto i : inputs) {
       //num_bits += i.getType().getIntOrFloatBitWidth();
+      //if (!getInData().contains(i)) {
       num_bits += getBitWidth(i);
+      //}
     }
     //std::cerr << "total input bits: " << num_bits << "\n";
-
+    
     assert(num_bits < 10 && "Too many input bits to simulate");
     
     bit_vectors.push_back("0");
@@ -251,6 +257,8 @@ namespace handshake {
     for (auto i : getInData()) {
       if (std::find(inputs.begin(), inputs.end(), i) == inputs.end()) {
 	xInputs.push_back(i);
+      } else {
+	assert (true && "ERROR: DATA WIRE IN TRANSITION INPUTS\n");
       }
     }
     for (auto i : getOutReady()) {
@@ -284,9 +292,13 @@ namespace handshake {
       }
       simulateOps(stateMap, prevStateMap);
       for (auto [key, val] : state) {
-	if (stateMap[key.getDefiningOp()->getOperand(0)] != val) {
+	//key.getDefiningOp()->print(llvm::errs());
+	//std::cerr << "\n" << valueName(key.getDefiningOp()->getParentOp(), key) << " = " << netValueStr(val) << " " << (val.x ? ("") : (std::to_string(val.value.getBitWidth()))) << "\n";
+	//std::cerr << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << " = " << netValueStr(stateMap[key.getDefiningOp()->getOperand(0)]) << " " << (stateMap[key.getDefiningOp()->getOperand(0)].x ? ("") : (std::to_string(stateMap[key.getDefiningOp()->getOperand(0)].value.getBitWidth()))) << "\n------------------\n";
+	if (!val.x && stateMap[key.getDefiningOp()->getOperand(0)] != val) {
 	  // transition from idle state
 	  transition_bit_vectors.push_back(input_bits);
+	  //std::cerr << "transition: " << input_bits << "\n";
 	  break;
 	}
       }
@@ -315,6 +327,7 @@ namespace handshake {
 	}
       }
     }
+    
     // data ops are not wrap/unwrap and have an operand that isn't in control
     for (auto &op : module.getBodyBlock()->getOperations()) {
       if (!isa<esi::WrapValidReadyOp>(op) && !isa<esi::UnwrapValidReadyOp>(op) && !isa<hw::OutputOp>(op)) {
@@ -324,6 +337,7 @@ namespace handshake {
 	    break;
 	  }
 	}
+	//}
       }
     }
     
