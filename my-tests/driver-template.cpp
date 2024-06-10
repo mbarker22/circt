@@ -24,22 +24,29 @@ void getInputVector(std::string str, std::vector<int> &vec) {
   vec.push_back(stoi(str.substr(last)));
 }
 
-void acceptInput(CData ready, CData &valid, QData data, std::vector<int> &offered, std::vector<int> &accepted) {
+bool acceptInput(CData ready, CData valid, QData data, std::vector<int> &offered, std::vector<int> &accepted) {
   if (ready && valid) {
     accepted.push_back(data);
     offered.pop_back();
-    valid = 0x0;
+    return true;
   }
+  return false;
 }
 
-void recordOutput(CData &ready, CData valid, QData data, std::vector<int> &output) {
+void recordOutput(CData ready, CData valid, QData data, std::vector<int> &output) {
   if (ready && valid) {
     output.push_back(data);
-    ready = 0x0;
   }
 }
 
+/*
+@ ready & valid
+   ? ready
+   ! valid
+   " "  neither ready nor valid
+*/
 void trace(std::ofstream &traceFile, CData ready, CData valid, QData data) {
+  traceFile << (ready ? (valid ? '@' : '?') : (valid ? '!' : ' '));
   if (ready && valid) {
     traceFile << std::setw(2) << data << " ";
   } else {
@@ -72,12 +79,14 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
-  for ( ; main_time < 1000 * 4; main_time++) {
+  for ( ; main_time < 1500 * 4; main_time++) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 
     case 1:
       // HANDSHAKE
+
+      break;
       
     case 2:
       tb->clock = 0;
@@ -98,6 +107,7 @@ int main(int argc, char **argv) {
     tb->eval();
   }
 
+  outFile << std::hex;
   // RESULTS
 
   traceFile.close();

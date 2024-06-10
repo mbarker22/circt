@@ -69,27 +69,28 @@ def setup(path, basename):
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('SETUP', line)][0]
     for idx, i in enumerate(inputs):
-        template.insert(insertPoint, "std::vector<int> %s_offered;\nstd::vector<int> %s;\ngetInputVector(std::string(argv[%d]), %s_offered);\n"%(i[0], i[0], idx+2, i[0]))
+        template.insert(insertPoint, "std::vector<int> %s_offered;\nbool %s_accepted = false;\nstd::vector<int> %s;\ngetInputVector(std::string(argv[%d]), %s_offered);\n"%(i[0], i[0], i[0], idx+2, i[0]))
     for o in outputs:
         template.insert(insertPoint, "std::vector<int> %s;\n"%(o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
     for i in inputs:
-        template.insert(insertPoint, "acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0]))
-    for o in outputs:
-        template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
+        template.insert(insertPoint, "if (%s_accepted) {\ntb->%s_valid = 0x0;\n%s_accepted = false;\n}\n"%(i[0], i[0], i[0]))
+   
         
     insertPoint = [idx for idx, line in enumerate(template) if re.search('INPUTS', line)][0]
     for i in inputs:
         template.insert(insertPoint, "tb->%s = (tb->%s_valid == 1) ? %s_offered.back() : 0;\n"%(i[0], i[0], i[0]))
         template.insert(insertPoint, "tb->%s_valid = (tb->%s_valid == 0) ? ((%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0) : (tb->%s_valid = 0x1);\n"%(i[0], i[0], i[0], i[0]))
     for o in outputs:
-        template.insert(insertPoint, "tb->%s_ready = (tb->%s_ready == 0) ? (myrand() & 0x1) : (0x1);\n"%(o[0], o[0]))
+        template.insert(insertPoint, "tb->%s_ready = myrand() & 0x1;\n"%(o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('TRACE', line)][0]
     for i in inputs:
+        template.insert(insertPoint, "%s_accepted = acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0], i[0]))
         template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i[0], i[0], i[0]))
     for o in outputs:
+        template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
         template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o[0], o[0], o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
@@ -124,7 +125,10 @@ def cleanup(basename):
 for test in tests:
     basename = os.path.basename(test).split('.')[0]
     print("testing %s %s"%(test, basename))
-   
+
+    #cleanup(basename)
+    #continue
+
     input_arg = setup(test, basename)
 
     # lower to sv and run simulation
