@@ -786,17 +786,18 @@ public:
       if (ls.addWakeSignals) {
 	WakeSignalHelper wakeHelper(implModule);
 
-	// find idle state, if it exists
-	llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
-	bool idleStateExists = wakeHelper.findIdleState(idleState);
-      
-	if (idleStateExists) {	  
-	  // get ops that can sleep in the idle state
-	  llvm::SetVector<Operation*> data_ops;
-	  llvm::SmallVector<Value> input_args;
-	  llvm::SetVector<Value> output_args;
-	  wakeHelper.getDataOps(data_ops, input_args, output_args);
+	// get ops that can sleep in the idle state
+	llvm::SetVector<Operation*> data_ops;
+	llvm::SmallVector<Value> input_args;
+	llvm::SetVector<Value> output_args;
+	wakeHelper.getDataOps(data_ops, input_args, output_args);
 
+	if (!data_ops.empty()) {	  
+
+	  // find idle state, if it exists
+	  llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
+	  bool idleStateExists = wakeHelper.findIdleState(idleState);
+	  
 	  // any idle state registers in data plane need to be output from sleepable
 	  for (auto [key, val] : idleState) {
 	    if (data_ops.contains(key.getDefiningOp()) && !val.x) {
@@ -804,7 +805,7 @@ public:
 	    }
 	  }
 
-	  if (!data_ops.empty()) {
+	  if (idleStateExists) {
 	    // find out_valid and state transition inputs for wake signal before modifying circuit
 	    llvm::SetVector<Value> out_valid = wakeHelper.getOutValid(); 
 	    llvm::SmallVector<Value> state_transition_inputs;
@@ -995,10 +996,12 @@ public:
 	      wake.setValue(wakeOp);
 	    }
 	  } else {
-	    std::cerr << "NO DATA OPS\n";
+	    //op.print(llvm::errs());
+	    std::cerr << "NO IDLE STATE:" << op->getName().getStringRef().str() << "\n";
 	  } 
 	} else {
-	  std::cerr << "NO IDLE STATE\n";
+	  //op.print(llvm::errs());
+	  std::cerr << "NO DATA OPS: " << op->getName().getStringRef().str() << "\n";  
 	}
       } 
     } 
