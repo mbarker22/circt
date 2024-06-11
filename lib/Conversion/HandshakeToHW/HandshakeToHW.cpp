@@ -317,7 +317,7 @@ static LogicalResult convertExtMemoryOps(HWModuleOp mod) {
       memrefPorts[i] = arg;
   }
 
-  if (memrefPorts.empty())
+  if (memrefPorts.empty()) 
     return success(); // nothing to do.
 
   OpBuilder b(mod);
@@ -765,7 +765,6 @@ public:
     // builder.
     hw::HWModuleLike implModule = checkSubModuleOp(ls.parentModule, op);
     if (!implModule) {
-      
       auto portInfo = ModulePortInfo(getPortInfoForOp(op, ls.addWakeSignals));
       submoduleBuilder.setInsertionPoint(op->getParentOp());
       implModule = submoduleBuilder.create<hw::HWModuleOp>(
@@ -792,8 +791,7 @@ public:
 	llvm::SetVector<Value> output_args;
 	wakeHelper.getDataOps(data_ops, input_args, output_args);
 
-	if (!data_ops.empty()) {	  
-
+	if (!data_ops.empty()) {
 	  // find idle state, if it exists
 	  llvm::DenseMap<Value, WakeSignalHelper::netValue> idleState;
 	  bool idleStateExists = wakeHelper.findIdleState(idleState);
@@ -872,7 +870,7 @@ public:
 	    // instantiate sleepable module
 	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	    auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
-		
+	    
 	    IRMapping valueMap;
 	    for (auto [idx, arg] : llvm::enumerate(input_args)) {
 	      valueMap.map(arg, sleepModule.getBodyBlock()->getArguments()[idx]);
@@ -933,7 +931,7 @@ public:
 	      }
 	      op->dropAllUses();
 	      op->erase();
-	    }
+	    }    
 	    
 	    // gate outputs with awake signal (and wake so that outputs yanked to 0 in same cycle)
 	    RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
@@ -947,6 +945,7 @@ public:
 	      auto readyAndAwake = s.bAnd({ready, awake, wake});
 	      ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
 	    }
+	    
 	    // define wake signal
 	    Value outValidOp;
 	    if (out_valid.size() == 1)
@@ -996,15 +995,13 @@ public:
 	      wake.setValue(wakeOp);
 	    }
 	  } else {
-	    //op.print(llvm::errs());
-	    std::cerr << "NO IDLE STATE:" << op->getName().getStringRef().str() << "\n";
+	    std::cerr << "NO IDLE STATE: " << op->getName().getStringRef().str() << "\n";
 	  } 
 	} else {
-	  //op.print(llvm::errs());
 	  std::cerr << "NO DATA OPS: " << op->getName().getStringRef().str() << "\n";  
 	}
       } 
-    } 
+    }
     
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
@@ -2174,8 +2171,8 @@ public:
     for (auto f : mod.getOps<handshake::FuncOp>()) {
       if (failed(verifyAllValuesHasOneUse(f))) {
         f.emitOpError() << "HandshakeToHW: failed to verify that all values "
-                           "are used exactly once. Remember to run the "
-                           "fork/sink materialization pass before HW lowering.";
+	  "are used exactly once. Remember to run the "
+	  "fork/sink materialization pass before HW lowering.";
         signalPassFailure();
         return;
       }
@@ -2197,8 +2194,8 @@ public:
     target.addLegalOp<hw::HWModuleOp, hw::HWModuleExternOp, hw::OutputOp,
                       hw::InstanceOp>();
     target
-        .addIllegalDialect<handshake::HandshakeDialect, arith::ArithDialect>();
-
+      .addIllegalDialect<handshake::HandshakeDialect, arith::ArithDialect>();
+    
     // Convert the handshake.func operations in post-order wrt. the instance
     // graph. This ensures that any referenced submodules (through
     // handshake.instance) has already been lowered, and their HW module
@@ -2214,12 +2211,13 @@ public:
         return;
       }
     }
-
+    
     // Second stage: Convert any handshake.extmemory operations and the
     // top-level I/O associated with these.
     for (auto hwModule : mod.getOps<hw::HWModuleOp>())
       if (failed(convertExtMemoryOps(hwModule)))
         return signalPassFailure();
+    
   }
 };
 } // end anonymous namespace

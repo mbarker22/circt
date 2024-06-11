@@ -125,30 +125,15 @@ namespace handshake {
 	prevStateMap = history.back();
       }
       simulateOps(stateMap, prevStateMap);
-      // std::cerr << "simulation cycle:\n";
-      // for (auto reg : module.getBodyBlock()->getOps<seq::CompRegOp>()) {
-      // 	reg->print(llvm::errs());
-      // 	std::cerr << " -> " << netValueStr(stateMap[reg]) << "\n";
-      // }
       
       if (history.size() > 0) {
 	if (history.back() == stateMap) {
-	  // self edge - idle state found
-	  //std::cerr << "idle state:\n";
-	  //int num_bits = 0;
 	  for (auto [key, val] : stateMap) {
 	    if (isa<seq::CompRegOp>(key.getDefiningOp())) { // && !val.x) {
-	      //num_bits += getBitWidth(key);
 	      idleState[key] = val;
-	      //std::cerr << valueName(key.getDefiningOp()->getParentOp(), key) << " -> " << netValueStr(val) << "\n";
 	    }
 	  }
-	  //if (num_bits > 10) {
-	    //std::cerr << "too many bits\n";
-	    //return false;
-	  //} else {
 	  return true;
-	  // }
 	} else if (std::find(history.begin(), history.end(), stateMap) != history.end()) {
 	  // cycle - no idle state
 	  return false;
@@ -167,21 +152,16 @@ namespace handshake {
     llvm::SmallVector<Value> stack;
     llvm::SetVector<Value> visited;
     // find inputs that drive state registers
-    //std::cerr << "starting vals:\n";
     for (auto [key, val] : state) {
       if (!val.x) {
 	// don't worry about don't cares
 	stack.push_back(key.getDefiningOp()->getOperand(0));
 	stack.push_back(key.getDefiningOp()->getOperand(3));
-	//std::cerr << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << "\n" << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << "\n";
       }
     }
 
     while (!stack.empty()) {
       auto net = stack.back();
-      // std::cerr << "net: " << valueName(net.getDefiningOp()->getParentOp(), net) << "\n";
-      // net.getDefiningOp()->print(llvm::errs());
-      // std::cerr << "\n";
       stack.pop_back();
       visited.insert(net);
 		  
@@ -212,21 +192,13 @@ namespace handshake {
 	}
       }
     }
-    // std::cerr << "transition inputs\n";
-    // for (auto i : inputs) {
-    //   std::cerr << valueName(i.getDefiningOp()->getParentOp(), i) << " " << i.getType().getIntOrFloatBitWidth() << "\n";
-    // }
 
     // all combinations of those input bits
     llvm::SmallVector<std::string> bit_vectors;
     size_t num_bits = 0;
     for (auto i : inputs) {
-      //num_bits += i.getType().getIntOrFloatBitWidth();
-      //if (!getInData().contains(i)) {
       num_bits += getBitWidth(i);
-      //}
     }
-    //std::cerr << "total input bits: " << num_bits << "\n";
     
     assert(num_bits < 10 && "Too many input bits to simulate");
     
@@ -244,8 +216,6 @@ namespace handshake {
       }
       bit_vectors.append(update);
     }
-
-    //std::cerr << "bit vectors\n";
 
     // find all other inputs
     llvm::SmallVector<Value> xInputs;
@@ -266,8 +236,6 @@ namespace handshake {
 	xInputs.push_back(i);
       }
     }
-
-    //std::cerr << "don't care inputs\n";
     
     // simulate to find inputs that transition out of idle state
     llvm::DenseMap<Value, WakeSignalHelper::netValue> prevStateMap;
@@ -275,30 +243,22 @@ namespace handshake {
       prevStateMap[key.getDefiningOp()->getOperand(0)] = value;
     }
     for (auto input_bits : bit_vectors) {
-      //std::cerr << "simulate " << input_bits << "\n";
       llvm::DenseMap<Value, WakeSignalHelper::netValue> stateMap;
       size_t bit_start = 0;
       for (auto i : inputs) {
-	//auto num_bits = i.getType().getIntOrFloatBitWidth();
 	auto num_bits = getBitWidth(i);
 	std::string val = input_bits.substr(bit_start, num_bits);
 	stateMap[i] = {false, APInt(num_bits, StringRef(val), 2)};
 	bit_start += num_bits;
       }
-      //std::cerr << "set x inputs:\n";
       for (auto i : xInputs) {
-	//std::cerr << valueName(i.getDefiningOp()->getParentOp(), i) << "\n";
 	stateMap[i] = {true, APInt(getBitWidth(i), 0)};
       }
       simulateOps(stateMap, prevStateMap);
       for (auto [key, val] : state) {
-	//key.getDefiningOp()->print(llvm::errs());
-	//std::cerr << "\n" << valueName(key.getDefiningOp()->getParentOp(), key) << " = " << netValueStr(val) << " " << (val.x ? ("") : (std::to_string(val.value.getBitWidth()))) << "\n";
-	//std::cerr << valueName(key.getDefiningOp()->getParentOp(), key.getDefiningOp()->getOperand(0)) << " = " << netValueStr(stateMap[key.getDefiningOp()->getOperand(0)]) << " " << (stateMap[key.getDefiningOp()->getOperand(0)].x ? ("") : (std::to_string(stateMap[key.getDefiningOp()->getOperand(0)].value.getBitWidth()))) << "\n------------------\n";
 	if (!val.x && stateMap[key.getDefiningOp()->getOperand(0)] != val) {
 	  // transition from idle state
 	  transition_bit_vectors.push_back(input_bits);
-	  //std::cerr << "transition: " << input_bits << "\n";
 	  break;
 	}
       }
@@ -329,15 +289,15 @@ namespace handshake {
     }
     
     // data ops are not wrap/unwrap and have an operand that isn't in control
+    // read/write ops cannot be in different region than their memory and memory will always be in ctrl
     for (auto &op : module.getBodyBlock()->getOperations()) {
-      if (!isa<esi::WrapValidReadyOp>(op) && !isa<esi::UnwrapValidReadyOp>(op) && !isa<hw::OutputOp>(op)) {
+      if (!isa<esi::WrapValidReadyOp>(op) && !isa<esi::UnwrapValidReadyOp>(op) && !isa<hw::OutputOp>(op) && !isa<seq::ReadPortOp>(op) && !isa<seq::WritePortOp>(op)) {
 	for (auto i : op.getOperands()) {
 	  if (!ctrl.contains(i)) {
 	    data_ops.insert(&op);
 	    break;
 	  }
 	}
-	//}
       }
     }
     
@@ -400,8 +360,6 @@ namespace handshake {
   }
   
   void WakeSignalHelper::simulateOps(llvm::DenseMap<Value, netValue> &stateMap, llvm::DenseMap<Value, netValue> &prevStateMap) {
-    // TODO: more than 2 inputs
-    // TODO: don't cares
     for (auto &op : traverseOrder) {
       // op->print(llvm::errs());
       // std::cerr << "\n";
@@ -644,68 +602,40 @@ namespace handshake {
 	  stateMap[op->getResult(0)] = {resX, resVal};
 	})
 	.Case([&](hw::StructCreateOp op) {
-	  //std::cerr << "StructCreateOp: ";
-	  //op.print(llvm::errs());
-	  //std::cerr << "\n"; 
 	  APInt resVal = stateMap[op->getOperand(0)].value;
 	  bool resX = stateMap[op->getOperand(0)].x;
-	  // if (resX) {
-	  //   std::cerr << "struct: X\n";
-	  // } else {
-	  //   std::cerr << "struct: ";
-	  //   resVal.print(llvm::errs(), false);
-	  //   std::cerr << "\n";
-	  // }
 	  if (!resX) {
 	    for (auto operand = op->getOperands().begin()+1; operand < op->getOperands().end(); operand++) {
 	      if (stateMap[*operand].x) {
 		resX = true;
-		//std::cerr << " struct: X";
 		break;
 	      }
 	      resVal = resVal.concat(stateMap[*operand].value);
-	      // std::cerr << "append: ";
-	      // stateMap[*operand].value.print(llvm::errs(), false);
-	      // std::cerr << " struct: ";
-	      // resVal.print(llvm::errs(), false);
-	      // std::cerr << "\n";
 	    }
 	  }
 	  stateMap[op->getResult(0)] = {resX, resVal};
 	})
 	.Case([&](hw::StructExplodeOp op) {
-	  // std::cerr << "StructExplodeOp: ";
-	  //op.print(llvm::errs());
-	  //std::cerr << "\n";
 	  APInt resVal;
 	  bool resX = stateMap[op->getOperand(0)].x;
 	  auto extractFrom = stateMap[op->getOperand(0)].value;
-	  // std::cerr << "input: ";
-	  // if (resX)
-	  //   std::cerr << "X\n";
-	  // else {
-	  //   extractFrom.print(llvm::errs(), false);
-	  //   std::cerr << " " << extractFrom.getBitWidth() << "\n";
-	  // }
 	  int lowBit = 0;
 	  for (auto res : op->getResults()) {
-	    //std::cerr << "output: ";
 	    if (resX) {
-	      //std::cerr << "X\n";
 	      stateMap[res] = {resX, resVal};
 	    } else {
 	      auto numBits = res.getType().getIntOrFloatBitWidth();
-	      //std::cerr << "extract " << numBits << " from " << lowBit << "\n";
 	      resVal = extractFrom.extractBits(numBits, lowBit);
 	      stateMap[res] = {resX, resVal};
-	      //resVal.print(llvm::errs(), false);
-	      //std::cerr << "\n";
 	      lowBit += numBits;
 	    }
 	  }
 	})
+	.Case([&](seq::ReadPortOp op) {
+	  stateMap[op->getResult(0)] = {true, APInt(1, 1)};
+	})
 	.Default([&](Operation* op) {
-	  if (!isa<hw::OutputOp>(op)) {
+	  if (!isa<hw::OutputOp>(op) && !isa<seq::WritePortOp>(op) && !isa<seq::HLMemOp>(op)) {
 	    std::cerr << "FIX: unknown op: " << op->getName().getStringRef().str() << "\n";
 	  }
 	});
