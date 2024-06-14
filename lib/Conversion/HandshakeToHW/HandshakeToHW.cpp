@@ -913,16 +913,20 @@ public:
 	    }
 
 	    // replace data op uses in always on partition
+	    bool idleDataReg = false;
 	    for (auto res : output_args) {	    
 	      res.replaceAllUsesWith(output_map[res]);
-
-	      // replace any idleState registers in map
+	      
+	      // replace any idleState registers in map, if value isn't X need wake signal workaround
 	      if (isa<seq::CompRegOp>(res.getDefiningOp())) {
 		idleState[output_map[res]] = idleState[res];
 		idleState.erase(res);
+		if (!idleState[output_map[res]].x) {
+		idleDataReg = true;
+		}
 	      }
 	    }
-	  
+	    
 	    // erase cloned data ops
 	    for (auto op: data_ops) {
 	      if (isa<seq::CompRegOp>(op) && idleState.contains(op->getResult(0))) {
@@ -933,16 +937,16 @@ public:
 	      op->erase();
 	    }    
 	    
-	    // gate outputs with awake signal (and wake so that outputs yanked to 0 in same cycle)
+	    // gate outputs with awake signal
 	    RTLBuilder s(portInfo, submoduleBuilder, op.getLoc());
 	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
 	    auto awake = sleepInstance->getResults().back();
 	    for (auto valid : wakeHelper.getOutValid()) {
-	      auto validAndAwake = s.bAnd({valid, awake, wake});
+	      auto validAndAwake = s.bAnd({valid, awake});
 	      valid.replaceAllUsesExcept(validAndAwake, validAndAwake.getDefiningOp());
 	    }	
 	    for (auto ready : wakeHelper.getInReady()) {
-	      auto readyAndAwake = s.bAnd({ready, awake, wake});
+	      auto readyAndAwake = s.bAnd({ready, awake});
 	      ready.replaceAllUsesExcept(readyAndAwake, readyAndAwake.getDefiningOp());
 	    }
 	    
@@ -970,7 +974,12 @@ public:
 	      
 	      // if asleep, idle is true
 	      Value idleOpAwake = s.bAnd(idleStateOps, "idle");
-	      Value idleOp = s.mux(awake, {s.constant(APInt(1, 1)), idleOpAwake});
+	      Value idleOp; // = s.mux(awake, {s.constant(APInt(1, 1)), idleOpAwake});
+	      if (idleDataReg) {
+	       	idleOp = s.mux(awake, {s.constant(APInt(1, 1)), idleOpAwake});
+	      } else {
+	       	idleOp = idleOpAwake;
+	      }
 	      Value notIdleOp = s.bNot(idleOp);
 				      
 	      // add idle state transition ops
