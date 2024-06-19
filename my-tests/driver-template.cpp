@@ -79,6 +79,14 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
+  // reset
+  tb->reset = 1;
+  tb->clock = 0;
+  tb->eval();
+  tb->clock = 1;
+  tb->eval();
+  tb->reset = 0;
+  
   for ( ; main_time < 1500 * 4; main_time++) {
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;

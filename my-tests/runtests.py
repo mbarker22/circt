@@ -18,9 +18,14 @@ print("running: ", tests)
 
 # run lowering passes
 def lower(path, basename, wake_signals):
-    cmd = "circt-opt %s -lower-handshake-to-hw=\"add-wake-signals=%d\""%(path, wake_signals)
-    cmd += " --lower-esi-ports --lower-esi-to-hw"
-    cmd += " --lower-seq-to-sv"
+    cmd = "circt-opt %s "%(path)
+    cmd += "--handshake-materialize-forks-sinks" # handshake lowering requires every SSA value to have exactly one use
+    cmd += " -lower-handshake-to-hw=\"add-wake-signals=%d\""%(wake_signals) # lower handshake and add wake signals
+    cmd += " --lower-esi-ports --lower-esi-to-hw" # lower esi channels
+    cmd += " -lower-comb -canonicalize" # lower combinational and run canonicalizeation
+    cmd += " --lower-seq-hlmem --lower-seq-to-sv" # lower sequential (clock, reg, mem) to sv
+    cmd += " -hw-cleanup -canonicalize" # cleanup ir and canonicalize again 
+    cmd += " -hw-legalize-modules -prettify-verilog" # last steps before exporing verilog
     cmd += " -export-verilog -o %s.mlir-out"%(basename)
     cmd += " > %s.sv"%(basename)
     print("  lowering: " + cmd)
