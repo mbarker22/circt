@@ -18,10 +18,20 @@ void getInputVector(std::string str, std::vector<int> &vec) {
   size_t next = 0;
   
   while ((next = str.find(",", last)) != std::string::npos) {
-    vec.push_back(stoi(str.substr(last, next-last)));
+    std::string s = str.substr(last, next-last);
+    if (s == "n") {
+      vec.push_back(-1);
+    } else {
+      vec.push_back(stoi(s));
+    }
     last = next + 1;
   }
-  vec.push_back(stoi(str.substr(last)));
+  std::string s = str.substr(last);
+  if (s == "n") {
+    vec.push_back(-1);
+  } else {
+    vec.push_back(stoi(s));
+  }
 }
 
 bool acceptInput(CData ready, CData valid, QData data, std::vector<int> &offered, std::vector<int> &accepted) {
@@ -79,6 +89,8 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
+  int delay = 2000*4;
+
   // reset
   tb->reset = 1;
   tb->clock = 0;
@@ -86,8 +98,8 @@ int main(int argc, char **argv) {
   tb->clock = 1;
   tb->eval();
   tb->reset = 0;
-  
-  for ( ; main_time < 1500 * 4; main_time++) {
+
+  while (EXIST (delay > 0)) { 
     switch (main_time & 0x3) {
     case 0: tb->clock = 1; break;
 
@@ -104,7 +116,7 @@ int main(int argc, char **argv) {
       break;
 
     case 3:
-      traceFile << std::dec << std::setw(5) << main_time << ' ' << std::hex << std::setw(2);
+      traceFile << std::dec << std::setw(5) << (main_time/4) << ' ' << std::hex << std::setw(2);
       // TRACE
 
       traceFile << std::endl;
@@ -113,6 +125,8 @@ int main(int argc, char **argv) {
     }
     
     tb->eval();
+    main_time++;
+    DELAY
   }
 
   outFile << std::hex;

@@ -44,7 +44,7 @@ def run(basename, inputs, wake_signals):
     cmd += " --simargs=\"%s %s\""%(basename+("-wake" if wake_signals else "-std"), inputs)
     print("  simulating: " + cmd)
     
-    result = subprocess.run(cmd, shell=True, capture_output=True)
+    result = subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
     if (result.returncode == 0):
         print("  sumulation successful")
         return True
@@ -59,9 +59,9 @@ def setup(path, basename):
     inputFile = open("%s"%(path), "r")
     for line in inputFile.readlines():
         if re.findall(r'handshake.func', line):
-            inputs = [i for i in re.findall(r'%([0-9a-z]+?) *: ([0-9a-z]+)', line) if i[1] != "none"]
+            inputs = [i for i in re.findall(r'%(\w+?) *: (\w+)', line)]
             if "->" in line:
-                outputs = [("out%s"%(idx), i) for [idx, i] in enumerate(re.findall(r'([0-9a-z]+)', line.split("->")[1])) if i != "none"]             
+                outputs = [("out%s"%(idx), i) for [idx, i] in enumerate(re.findall(r'(\w+)', line.split("->")[1]))]             
             else :
                 outputs = []
             
@@ -85,18 +85,27 @@ def setup(path, basename):
         
     insertPoint = [idx for idx, line in enumerate(template) if re.search('INPUTS', line)][0]
     for i in inputs:
-        template.insert(insertPoint, "tb->%s = (tb->%s_valid == 1) ? %s_offered.back() : 0;\n"%(i[0], i[0], i[0]))
+        if i[1] != "none":
+            template.insert(insertPoint, "tb->%s = (tb->%s_valid == 1) ? %s_offered.back() : 0;\n"%(i[0], i[0], i[0]))
         template.insert(insertPoint, "tb->%s_valid = (tb->%s_valid == 0) ? ((%s_offered.size() > 0) ? (myrand() & 0x1) : 0x0) : (tb->%s_valid = 0x1);\n"%(i[0], i[0], i[0], i[0]))
     for o in outputs:
         template.insert(insertPoint, "tb->%s_ready = myrand() & 0x1;\n"%(o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('TRACE', line)][0]
     for i in inputs:
-        template.insert(insertPoint, "%s_accepted = acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0], i[0]))
-        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i[0], i[0], i[0]))
+        if i[1] != "none":
+            template.insert(insertPoint, "%s_accepted = acceptInput(tb->%s_ready, tb->%s_valid, tb->%s, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0], i[0]))
+            template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(i[0], i[0], i[0]))
+        else:
+            template.insert(insertPoint, "%s_accepted = acceptInput(tb->%s_ready, tb->%s_valid, 0x0, %s_offered, %s);\n"%(i[0], i[0], i[0], i[0], i[0]))
+            template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, 0x0);\n"%(i[0], i[0]))
     for o in outputs:
-        template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
-        template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o[0], o[0], o[0]))
+        if o[1] != "none":
+            template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
+            template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o[0], o[0], o[0]))
+        else:
+            template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, 0x0, %s);\n"%(o[0], o[0], o[0]))
+            template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, 0x0);\n"%(o[0], o[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
     for i in inputs:
@@ -104,18 +113,40 @@ def setup(path, basename):
     for o in outputs:
         template.insert(insertPoint, "printResult(outFile, %s);\n"%(o[0]))
 
+    inputs_exist = "";
+    for i in inputs:
+        inputs_exist += "!%s_offered.empty() && "%(i[0])
+    inputs_exist = inputs_exist[:-3]
+    if len(inputs) > 0:
+        inputs_exist = "(" + inputs_exist
+        inputs_exist += ") || "
+    
+    no_inputs = ""
+    for i in inputs:
+        no_inputs += "%s_offered.empty() || "%(i[0])
+    no_inputs = no_inputs[:-3]
+    if len(inputs) > 0:
+        no_inputs = "if (" + no_inputs + ") delay--;"
+    else:
+        no_inputs += "delay--;"
+    
     # write driver file
     driverFile = open("%s-driver.cpp"%(basename), "w")
     template_string = "".join(x for x in template)
     template_string = template_string.replace("NAME", "test_%s"%(basename))
+    template_string = template_string.replace("EXIST", inputs_exist)
+    template_string = template_string.replace("DELAY", no_inputs)
     driverFile.write(template_string)
     driverFile.close()
 
     # random input strings
     input_arg = ""
     for i in inputs:
-        bits = 64 if i[1] == "index" else int(i[1].split("i")[1])
-        input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(100)]
+        if i[1] == "none":
+            input_vals = ['n' for j in range(4)]
+        else:
+            bits = 64 if i[1] == "index" else int(i[1].split("i")[1])
+            input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(4)]
         input_arg += ",".join(input_vals) + " "
     return input_arg
 
