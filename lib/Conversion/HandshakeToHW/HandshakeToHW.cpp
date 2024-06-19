@@ -847,8 +847,9 @@ public:
 		  int rand_int = rand() % 16;
 		  RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
 		  auto delayConst = s.constant(width, rand_int);
+		  auto zeroConst = s.constant(width, 0);
 		  auto delay = bb.get(IntegerType::get(op->getContext(), width));
-		  auto delayReg = s.reg("delay", delay, delayConst);
+		  auto delayReg = s.reg("delay", delay, zeroConst);
 		  auto delayEqZero = s.bNot(s.rOr(delayReg));
 		  auto decDelay = s.sub(delayReg, s.constant(width, 1));
 		  auto selectHoldOrDec = s.mux(delayEqZero, {decDelay, delayReg});
