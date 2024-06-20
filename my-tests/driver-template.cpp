@@ -1,4 +1,5 @@
 #include "VNAME.h"
+#include "VNAME___024root.h"
 #include "verilated.h"
 #include <iostream>
 #include <fstream>
@@ -43,10 +44,12 @@ bool acceptInput(CData ready, CData valid, QData data, std::vector<int> &offered
   return false;
 }
 
-void recordOutput(CData ready, CData valid, QData data, std::vector<int> &output) {
+bool recordOutput(CData ready, CData valid, QData data, std::vector<int> &output) {
   if (ready && valid) {
     output.push_back(data);
+    return true;
   }
+  return false;
 }
 
 /*
@@ -75,8 +78,6 @@ int main(int argc, char **argv) {
   Verilated::commandArgs(argc, argv);
   auto *tb = new VNAME;
 
-  // SETUP
-  
   vluint64_t main_time = 0;
 
   std::ofstream traceFile;
@@ -89,6 +90,14 @@ int main(int argc, char **argv) {
   ss << argv[1] << ".out";
   outFile.open(ss.str());
 
+  std::ofstream dataFile;
+  ss.str("");
+  ss << argv[1] << ".data";
+  dataFile.open(ss.str());
+
+  // SETUP
+  
+  int last_cycle = 0;
   int delay = 2000*4;
 
   // reset
@@ -129,10 +138,10 @@ int main(int argc, char **argv) {
     DELAY
   }
 
-  outFile << std::hex;
   // RESULTS
 
   traceFile.close();
   outFile.close();
+  dataFile.close();
   exit(EXIT_SUCCESS);
 }

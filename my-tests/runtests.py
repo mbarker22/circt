@@ -54,19 +54,11 @@ def run(basename, inputs, wake_signals):
         print(result.stderr)
         return False
 
-def setup(path, basename):
-# get func op io
-    inputFile = open("%s"%(path), "r")
-    for line in inputFile.readlines():
-        if re.findall(r'handshake.func', line):
-            inputs = [i for i in re.findall(r'%(\w+?) *: (\w+)', line)]
-            if "->" in line:
-                outputs = [("out%s"%(idx), i) for [idx, i] in enumerate(re.findall(r'(\w+)', line.split("->")[1]))]             
-            else :
-                outputs = []
-            
-    inputFile.close()
-
+def setup(path, basename, mode, inputs, outputs):
+    
+    if mode == 1:
+        awakeSignals = getAwakeSignals(basename)
+        
     # generate verilator driver file
     templateFile = open("driver-template.cpp", "r")
     template = templateFile.readlines();
@@ -75,8 +67,13 @@ def setup(path, basename):
     insertPoint = [idx for idx, line in enumerate(template) if re.search('SETUP', line)][0]
     for idx, i in enumerate(inputs):
         template.insert(insertPoint, "std::vector<int> %s_offered;\nbool %s_accepted = false;\nstd::vector<int> %s;\ngetInputVector(std::string(argv[%d]), %s_offered);\n"%(i[0], i[0], i[0], idx+2, i[0]))
+        template.insert(insertPoint, "dataFile << \"%s: \" << argv[%d] << std::endl;\n"%(i[0], idx+2))
     for o in outputs:
         template.insert(insertPoint, "std::vector<int> %s;\n"%(o[0]))
+    if mode == 1:
+        for a in awakeSignals:
+            template.insert(insertPoint, "int %s_awake = 0;\n"%(a[0]))
+            template.insert(insertPoint, "int %s_wake = 0;\n"%(a[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
     for i in inputs:
@@ -101,17 +98,30 @@ def setup(path, basename):
             template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, 0x0);\n"%(i[0], i[0]))
     for o in outputs:
         if o[1] != "none":
-            template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s);\n"%(o[0], o[0], o[0], o[0]))
+            template.insert(insertPoint, "if (recordOutput(tb->%s_ready, tb->%s_valid, tb->%s, %s)) last_cycle = main_time/4;\n"%(o[0], o[0], o[0], o[0]))
             template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, tb->%s);\n"%(o[0], o[0], o[0]))
         else:
-            template.insert(insertPoint, "recordOutput(tb->%s_ready, tb->%s_valid, 0x0, %s);\n"%(o[0], o[0], o[0]))
+            template.insert(insertPoint, "if (recordOutput(tb->%s_ready, tb->%s_valid, 0x0, %s)) last_cycle = main_time/4;\n"%(o[0], o[0], o[0]))
             template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, 0x0);\n"%(o[0], o[0]))
+    if mode == 1:
+        for a in awakeSignals:
+            template.insert(insertPoint, "if (tb->rootp->%s == 1) %s_awake++;\n"%(a[1], a[0]))
+            template.insert(insertPoint, "if (tb->rootp->%s == 1) %s_wake++;\n"%(a[2], a[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
     for i in inputs:
         template.insert(insertPoint, "printResult(outFile, %s);\n"%(i[0]))
+        template.insert(insertPoint, "outFile << \"%s: \";\n"%(i[0]))
     for o in outputs:
         template.insert(insertPoint, "printResult(outFile, %s);\n"%(o[0]))
+        template.insert(insertPoint, "outFile << \"%s: \";\n"%(o[0]))
+    template.insert(insertPoint, "outFile << std::hex;\n")
+    if mode == 1:
+        for a in awakeSignals:
+            template.insert(insertPoint, "dataFile << \"%s_awake: \" << %s_awake << std::endl;\n"%(a[0], a[0]))
+            template.insert(insertPoint, "dataFile << \"%s_wake: \" << %s_wake << std::endl;\n"%(a[0], a[0]))
+    template.insert(insertPoint, "dataFile << \"simulation cycles: \" << (main_time/4) << std::endl;")
+    template.insert(insertPoint, "dataFile << \"last output: \" << last_cycle << std::endl;")
 
     inputs_exist = "";
     for i in inputs:
@@ -139,17 +149,6 @@ def setup(path, basename):
     driverFile.write(template_string)
     driverFile.close()
 
-    # random input strings
-    input_arg = ""
-    for i in inputs:
-        if i[1] == "none":
-            input_vals = ['n' for j in range(4)]
-        else:
-            bits = 64 if i[1] == "index" else int(i[1].split("i")[1])
-            input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(4)]
-        input_arg += ",".join(input_vals) + " "
-    return input_arg
-
 def cleanup(basename):
     files = ["%s-driver.cpp"%(basename), "%s.mlir-out"%(basename), "%s.sv"%(basename), "%s.sv.d"%(basename)]
     for f in files:
@@ -158,6 +157,43 @@ def cleanup(basename):
         elif (os.path.exists(f)):
             shutil.rmtree(f)
 
+def getInputs(path, basename, num_inputs):
+    # get func op io
+    inputFile = open("%s"%(path), "r")
+    for line in inputFile.readlines():
+        if re.findall(r'handshake.func', line):
+            inputs = [i for i in re.findall(r'%(\w+?) *: (\w+)', line)]
+            if "->" in line:
+                outputs = [("out%s"%(idx), i) for [idx, i] in enumerate(re.findall(r'(\w+)', line.split("->")[1]))]             
+            else :
+                outputs = []    
+    inputFile.close()
+
+    # random input strings
+    input_arg = ""
+    for i in inputs:
+        if i[1] == "none":
+            input_vals = ['n' for j in range(num_inputs)]
+        else:
+            bits = 64 if i[1] == "index" else int(i[1].split("i")[1])
+            input_vals = [str(random.randint(0,pow(2, min(bits-1, 8)))) for j in range(num_inputs)]
+        input_arg += ",".join(input_vals) + " "
+    return inputs, outputs, input_arg
+
+def getAwakeSignals(basename):
+    print("get metrics")
+    svFile = open("%s.sv"%(basename), "r")
+    svString = svFile.read()
+    sleepModules = re.findall(r'wire *_(\w+)_sleep_awake;', svString)
+    awakeSignals = []
+    for module in sleepModules:
+        awakeSignals += [("%s"%(i), "test_%s__DOT__%s__DOT___%s_sleep_awake"%(basename, i, module), "test_%s__DOT__%s__DOT__%s_sleep__DOT__wake"%(basename, i, module)) for i in re.findall(r'%s +(\w+) +\('%(module), svString)];
+    svFile.close()
+    svString = svString.replace('wake,', 'wake /* verilator public_flat */,')
+    with open("%s.sv"%(basename), "w") as file:
+        file.write(svString)
+    return awakeSignals
+
 for test in tests:
     basename = os.path.basename(test).split('.')[0]
     print("testing %s %s"%(test, basename))
@@ -165,13 +201,14 @@ for test in tests:
     #cleanup(basename)
     #continue
 
-    input_arg = setup(test, basename)
-
+    inputs, outputs, input_arg = getInputs(test, basename, 50)
+    
     # lower to sv and run simulation
     run_success = [False, False]
     for mode in [0, 1]:
         print("power gated" if mode else "standard")
         if lower(test, basename, mode):
+            setup(test, basename, mode, inputs, outputs)
             run_success[mode] = run(basename, input_arg, mode)
 
     # compare results
@@ -179,6 +216,9 @@ for test in tests:
         result = subprocess.run("diff %s.sv.d/%s-std.out %s.sv.d/%s-wake.out"%(basename, basename, basename, basename), shell=True, capture_output=True)
         if (len(result.stdout) == 0):
             print("%s PASS"%(basename))
+            generated_dir = os.path.join(os.getcwd(), "%s.sv.d"%(basename))
+            os.replace("%s/%s-std.data"%(generated_dir, basename), "simulation_data/%s-std.data"%(basename))
+            os.replace("%s/%s-wake.data"%(generated_dir, basename), "simulation_data/%s-wake.data"%(basename))
             cleanup(basename)
         else:
             print("%s FAIL"%(basename))
