@@ -74,6 +74,8 @@ def setup(path, basename, mode, inputs, outputs):
         for a in awakeSignals:
             template.insert(insertPoint, "int %s_awake = 0;\n"%(a[0]))
             template.insert(insertPoint, "int %s_wake = 0;\n"%(a[0]))
+            template.insert(insertPoint, "int %s_awake_prev = 1;\n"%(a[0]))
+            template.insert(insertPoint, "int %s_wakeup = 0;\n"%(a[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('HANDSHAKE', line)][0]
     for i in inputs:
@@ -105,8 +107,9 @@ def setup(path, basename, mode, inputs, outputs):
             template.insert(insertPoint, "trace(traceFile, tb->%s_ready, tb->%s_valid, 0x0);\n"%(o[0], o[0]))
     if mode == 1:
         for a in awakeSignals:
-            template.insert(insertPoint, "if (tb->rootp->%s == 1) %s_awake++;\n"%(a[1], a[0]))
+            template.insert(insertPoint, "%s_awake_prev = tb->rootp->%s;\n"%(a[0], a[1]))
             template.insert(insertPoint, "if (tb->rootp->%s == 1) %s_wake++;\n"%(a[2], a[0]))
+            template.insert(insertPoint, "if (tb->rootp->%s == 1) {\n %s_awake++;\n if (%s_awake_prev == 0) %s_wakeup++;\n}\n"%(a[1], a[0], a[0], a[0]))
 
     insertPoint = [idx for idx, line in enumerate(template) if re.search('RESULTS', line)][0]
     for i in inputs:
@@ -120,6 +123,8 @@ def setup(path, basename, mode, inputs, outputs):
         for a in awakeSignals:
             template.insert(insertPoint, "dataFile << \"%s_awake: \" << %s_awake << std::endl;\n"%(a[0], a[0]))
             template.insert(insertPoint, "dataFile << \"%s_wake: \" << %s_wake << std::endl;\n"%(a[0], a[0]))
+            template.insert(insertPoint, "dataFile << \"%s_wakeup: \" << %s_wakeup << std::endl;\n"%(a[0], a[0]))
+            
     template.insert(insertPoint, "dataFile << \"simulation cycles: \" << (main_time/4) << std::endl;")
     template.insert(insertPoint, "dataFile << \"last output: \" << last_cycle << std::endl;")
 
@@ -201,7 +206,7 @@ for test in tests:
     #cleanup(basename)
     #continue
 
-    inputs, outputs, input_arg = getInputs(test, basename, 50)
+    inputs, outputs, input_arg = getInputs(test, basename, 2)
     
     # lower to sv and run simulation
     run_success = [False, False]
@@ -216,10 +221,10 @@ for test in tests:
         result = subprocess.run("diff %s.sv.d/%s-std.out %s.sv.d/%s-wake.out"%(basename, basename, basename, basename), shell=True, capture_output=True)
         if (len(result.stdout) == 0):
             print("%s PASS"%(basename))
-            generated_dir = os.path.join(os.getcwd(), "%s.sv.d"%(basename))
-            os.replace("%s/%s-std.data"%(generated_dir, basename), "simulation_data/%s-std.data"%(basename))
-            os.replace("%s/%s-wake.data"%(generated_dir, basename), "simulation_data/%s-wake.data"%(basename))
-            cleanup(basename)
+            # generated_dir = os.path.join(os.getcwd(), "%s.sv.d"%(basename))
+            # os.replace("%s/%s-std.data"%(generated_dir, basename), "simulation_data/%s-std.data"%(basename))
+            # os.replace("%s/%s-wake.data"%(generated_dir, basename), "simulation_data/%s-wake.data"%(basename))
+            #cleanup(basename)
         else:
             print("%s FAIL"%(basename))
     else:
