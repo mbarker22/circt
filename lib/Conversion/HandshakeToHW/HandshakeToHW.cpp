@@ -836,20 +836,22 @@ public:
 	      arg_portId[arg] = idx;
 	    }
 	    output_ports.push_back({hw::PortInfo{StringAttr::get(op->getContext(), "awake"), IntegerType::get(op->getContext(), 1), ModulePort::Direction::Output}, output_args.size()});
-	  
+
+	    auto default_delay_param = ParamDeclAttr::get(StringAttr::get(op->getContext(), "DELAY"), submoduleBuilder.getI32IntegerAttr(1));
+	    auto delay_param_ref = ParamDeclRefAttr::get(StringAttr::get(op->getContext(), "DELAY"), IntegerType::get(op->getContext(), 32));
+
 	    submoduleBuilder.setInsertionPoint(op->getParentOp());
 	    auto sleepModule = submoduleBuilder.create<hw::HWModuleOp>(op.getLoc(), submoduleBuilder.getStringAttr(implModule.getName() + "_sleep"), ModulePortInfo(input_ports, output_ports), [&](OpBuilder &b, hw::HWModulePortAccessor &ports) {
 	      for (auto [idx, port] : llvm::enumerate(ports.getPortList().getOutputs())) {
 		if (idx == ports.getPortList().sizeOutputs()-1) {
 		  // last output is awake
 		  // add ops to insert a random wake time
-		  int width = 8;
-		  int rand_int = rand() % 16;
+		  int width = 32;
 		  RTLBuilder s(ports.getPortList(), submoduleBuilder, op.getLoc(), ports.getInput("clock"), ports.getInput("reset"));
-		  auto delayConst = s.constant(width, rand_int);
+		  auto delayConst = b.create<hw::ParamValueOp>(op.getLoc(), delay_param_ref.getType(), delay_param_ref);
 		  auto zeroConst = s.constant(width, 0);
 		  auto delay = bb.get(IntegerType::get(op->getContext(), width));
-		  auto delayReg = s.reg("delay", delay, zeroConst);
+		  auto delayReg = s.reg("count", delay, zeroConst);
 		  auto delayEqZero = s.bNot(s.rOr(delayReg));
 		  auto decDelay = s.sub(delayReg, s.constant(width, 1));
 		  auto selectHoldOrDec = s.mux(delayEqZero, {decDelay, delayReg});
@@ -862,15 +864,22 @@ public:
 		ports.setOutput(port.name, backedge);
 		bmap[idx] = backedge;
 	      }
-	    });
+	    }, ArrayAttr::get(op->getContext(), default_delay_param));
 
 	    // add clock and reset args
 	    input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 2));
 	    input_args.push_back(implModule.getArgumentForInput(implModule.getNumInputPorts() - 1));
+
+	    // add delay parameter to ctrl module
+	    if (auto mod = dyn_cast<hw::HWModuleOp>(&implModule)){
+	      mod->setParametersAttr(ArrayAttr::get(op->getContext(), default_delay_param));
+	    }
+	    
+	    auto delay_param = ParamDeclAttr::get(StringAttr::get(op->getContext(), "DELAY"), delay_param_ref);
 	  
 	    // instantiate sleepable module
 	    submoduleBuilder.setInsertionPoint(implModule.getBodyBlock()->getTerminator());
-	    auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args);
+	    auto sleepInstance = submoduleBuilder.create<hw::InstanceOp>(op.getLoc(), sleepModule, sleepModule.getName(), input_args, ArrayAttr::get(op->getContext(), delay_param));
 	    
 	    IRMapping valueMap;
 	    for (auto [idx, arg] : llvm::enumerate(input_args)) {
@@ -1004,6 +1013,8 @@ public:
 	      Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
 	      wake.setValue(wakeOp);
 	    }
+
+	   
 	  } else {
 	    std::cerr << "NO IDLE STATE: " << op->getName().getStringRef().str() << "\n";
 	  } 
@@ -1012,12 +1023,23 @@ public:
 	}
       } 
     }
-    
+
     // Instantiate the submodule.
     llvm::SmallVector<Value> operands = adaptor.getOperands();
-    addSequentialIOOperandsIfNeeded(op, operands, ls.addWakeSignals);    
-    rewriter.replaceOpWithNewOp<hw::InstanceOp>(
-						op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
+    addSequentialIOOperandsIfNeeded(op, operands, ls.addWakeSignals);
+    auto parameters = ArrayAttr{}; 
+    if (auto mod = dyn_cast<hw::HWModuleOp>(&implModule); mod->getParametersAttr().size() > 0) {
+      auto delay_param_ref = ParamDeclRefAttr::get(StringAttr::get(op->getContext(), "DELAY"), IntegerType::get(op->getContext(), 32));
+      auto delay_param = ParamDeclAttr::get(StringAttr::get(op->getContext(), "DELAY"), delay_param_ref);
+      parameters = ArrayAttr::get(op->getContext(), delay_param);
+      auto parent = cast<hw::HWModuleOp>(op->getParentOp());
+      if (parent.getParametersAttr().size() == 0) {
+       	auto default_delay_param = ArrayAttr::get(op->getContext(), ParamDeclAttr::get(StringAttr::get(op->getContext(), "DELAY"), submoduleBuilder.getI32IntegerAttr(1)));
+       	parent.setParametersAttr(default_delay_param);
+      }
+    }
+ 
+    rewriter.replaceOpWithNewOp<hw::InstanceOp>(op, implModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands, parameters);
     return success();
   }
     
