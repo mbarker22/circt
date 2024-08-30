@@ -855,3 +855,76 @@ def PackOp : Handshake_Op<"pack", [
 
   let hasCustomAssemblyFormat = 1;
 }
+
+def UnitRateReturnOp : Op<Handshake_Dialect, "unitrate.return", [
+   Terminator, HasParent<"UnitRateOp">
+]> {
+  let summary = "Handshake unit op terminator";
+
+  let arguments = (ins Variadic<AnyType> : $opOperands);
+
+  let assemblyFormat =
+    [{  attr-dict ($opOperands^ `:` type($opOperands))? }];
+
+  let builders = [
+    OpBuilder<(ins), "/*no-op*/">
+  ];
+}
+  
+
+def UnitRateOp : Op<Handshake_Dialect, "unitrate", [
+   IsolatedFromAbove,
+   FineGrainedDataflowRegionOpInterface,
+   SingleBlockImplicitTerminator<"handshake::UnitRateReturnOp">
+]> {
+  let summary = "Handshake dialect unit rate op.";
+  let description = [{
+    This is a way to treat multiple arith and comb ops as a single unit-rate actor. 
+  }];
+
+  let arguments = (ins Variadic<AnyType> : $inputs);
+  let results = (outs Variadic<AnyType> : $outputs);
+  let regions = (region AnyRegion : $body);
+
+  let builders = [
+    OpBuilder<(ins "TypeRange":$outputs, "ValueRange":$inputs), [{
+    $_state.addOperands(inputs);
+    Region* region = $_state.addRegion();
+    $_state.addTypes(outputs);
+    ensureTerminator(*region, $_builder, $_state.location);
+    llvm::SmallVector<Location> argLocs;
+    for(auto input : inputs)
+      argLocs.push_back(input.getLoc());
+    region->front().addArguments(inputs.getTypes(), argLocs);
+    }]>
+  ];	
+  
+  let skipDefaultBuilders = 1;
+
+  // let builders =
+  //      [OpBuilder<(ins "StringRef":$name, "FunctionType":$type,
+  //                     CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>];
+
+  // let extraClassDeclaration = [{
+  //   // Add an entry block to an empty function, and set up the block arguments
+  //   // to match the signature of the function.
+  //   Block *addEntryBlock();
+
+  //   /// Returns the body block of the function.
+  //   Block* getBodyBlock() {
+  //     return &getBody().front();
+  //   }
+
+  // let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let assemblyFormat = [{
+    $inputs attr-dict `:` functional-type($inputs, $outputs) $body
+  }];
+
+  let extraClassDeclaration = [{
+    Block* getBodyBlock() {
+      return &getBody().front();
+    }
+  }];
+}

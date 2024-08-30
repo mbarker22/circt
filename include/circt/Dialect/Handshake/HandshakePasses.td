@@ -123,4 +123,13 @@ def HandshakeLegalizeMemrefs : Pass<"handshake-legalize-memrefs", "mlir::func::F
   let dependentDialects = ["mlir::scf::SCFDialect"];
 }
 
+def HandshakeMergeUnitRate : Pass<"handshake-merge-unit-rate", "handshake::FuncOp"> {
+  let summary = "Merge arith and comb ops into unit-rate where possible";
+  let description = [{
+    This pass merges arith and comb ops that are directly connected into a single
+    unit-rate actor to have less handshake logic.
+  }];
+  let constructor = "circt::handshake::createHandshakeMergeUnitRatePass()";
+}
+
 #endif // CIRCT_DIALECT_HANDSHAKE_HANDSHAKEPASSES_TD

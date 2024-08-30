@@ -42,6 +42,7 @@ std::unique_ptr<mlir::OperationPass<handshake::FuncOp>>
 createHandshakeInsertBuffersPass(const std::string &strategy = "all",
                                  unsigned bufferSize = 2);
 std::unique_ptr<mlir::Pass> createHandshakeLockFunctionsPass();
+std::unique_ptr<mlir::Pass> createHandshakeMergeUnitRatePass();
 
 /// Iterates over the handshake::FuncOp's in the program to build an instance
 /// graph. In doing so, we detect whether there are any cycles in this graph, as
@@ -70,6 +71,8 @@ LogicalResult lockRegion(Region &r, OpBuilder &rewriter);
 // Applies the spcified buffering strategy on the region r.
 LogicalResult bufferRegion(Region &r, OpBuilder &rewriter, StringRef strategy,
                            unsigned bufferSize);
+
+LogicalResult mergeUnitRate(handshake::FuncOp &op, OpBuilder &rewriter);
 
 /// Generate the code for registering passes.
 #define GEN_PASS_REGISTRATION
