@@ -784,7 +784,7 @@ public:
 
       if (ls.addWakeSignals) {
 	WakeSignalHelper wakeHelper(implModule);
-
+	
 	// get ops that can sleep in the idle state
 	llvm::SetVector<Operation*> data_ops;
 	llvm::SmallVector<Value> input_args;
@@ -1013,6 +1013,9 @@ public:
 	      Value wakeOp = s.bOr({notIdleOp, outValidOp, stateChangeOp}, "wake");
 	      wake.setValue(wakeOp);
 	    }
+
+
+	    
 
 	   
 	  } else {
@@ -1361,6 +1364,47 @@ public:
       // twoState UnitAttr), specify attribute array explicitly.
       return s.b.create<TOut>(op.getLoc(), inputs,
                               /* attributes */ ArrayRef<NamedAttribute>{});
+    });
+  };
+};
+  
+class UnitRateOpConversionPattern : public HandshakeConversionPattern<UnitRateOp> {
+public:
+  using HandshakeConversionPattern<UnitRateOp>::HandshakeConversionPattern;
+  void buildModule(UnitRateOp op, BackedgeBuilder &bb, RTLBuilder &s,
+                   hw::HWModulePortAccessor &ports) const override {
+    auto unwrappedIO = this->unwrapIO(s, bb, ports);
+
+    // Control logic.
+    this->buildJoinLogic(s, unwrappedIO.inputs, unwrappedIO.outputs[0]);
+
+    IRMapping valueMap;
+    llvm::DenseMap<Value, std::shared_ptr<Backedge>> output_orig_to_unwrapped;
+    for (auto [idx, val] : llvm::enumerate(unwrappedIO.getInputDatas())) {
+      valueMap.map(op.getBodyBlock()->getArguments()[idx], val);
+    }
+    for (auto [idx, val] : llvm::enumerate(unwrappedIO.getOutputDatas())) {
+      output_orig_to_unwrapped[op.getBodyBlock()->getTerminator()->getOperand(idx)] = val;
+    }
+    
+    // Data logic.
+    op->walk([&](Operation* body_op) {
+      if (!isa<handshake::UnitRateReturnOp, handshake::UnitRateOp>(body_op)) {
+	auto newOp = s.b.cloneWithoutRegions(*body_op, valueMap);
+
+	//change index type results to match operands
+	for (auto res : newOp->getResults()) {
+	  if (res.getType().isIndex()) {
+	    res.setType(newOp->getOperand(0).getType());
+	  }
+	}
+	
+	for (auto [idx, res] : llvm::enumerate(body_op->getResults())) {
+	  if (output_orig_to_unwrapped.contains(res)) {
+	    output_orig_to_unwrapped[res]->setValue(newOp->getResult(idx));
+	  }
+	}
+      }
     });
   };
 };
@@ -2145,7 +2189,7 @@ static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
     }
     return instName;
   };
-
+  
   auto ls = HandshakeLoweringState{op->getParentOfType<mlir::ModuleOp>(),
     instanceUniquer, addWakeSignals};
   RewritePatternSet patterns(op.getContext());
@@ -2171,6 +2215,7 @@ static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
       UnitRateConversionPattern<arith::ShRUIOp, comb::ShrUOp>,
       UnitRateConversionPattern<arith::ShRSIOp, comb::ShrSOp>,
       UnitRateConversionPattern<arith::SelectOp, comb::MuxOp>,
+      UnitRateOpConversionPattern,
       // HW operations.
       StructCreateConversionPattern,
       // Handshake operations.
