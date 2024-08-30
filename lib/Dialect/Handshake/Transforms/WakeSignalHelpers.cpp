@@ -634,6 +634,18 @@ namespace handshake {
 	.Case([&](seq::ReadPortOp op) {
 	  stateMap[op->getResult(0)] = {true, APInt(1, 1)};
 	})
+	.Case([&](comb::ReplicateOp op) {
+	  APInt resVal = APInt::getZeroWidth();
+	  bool resX = stateMap[op->getOperand(0)].x;
+	  if (!resX) {
+	    auto multiple = op.getMultiple();
+	    auto value = stateMap[op->getOperand(0)].value;
+	    for (size_t i = 0; i < multiple; i++) {
+	      resVal = resVal.concat(value);
+	    }
+	  }
+	  stateMap[op->getResult(0)] = {resX, resVal};
+	})
 	.Default([&](Operation* op) {
 	  if (!isa<hw::OutputOp>(op) && !isa<seq::WritePortOp>(op) && !isa<seq::HLMemOp>(op)) {
 	    std::cerr << "FIX: unknown op: " << op->getName().getStringRef().str() << "\n";
