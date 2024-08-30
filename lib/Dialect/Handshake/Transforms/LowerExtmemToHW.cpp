@@ -380,6 +380,11 @@ HandshakeLowerExtmemToHWPass::lowerExtmemToHW(handshake::FuncOp func) {
     if (isa<MemRefType>(arg.getType()))
       memrefArgs[i] = arg;
 
+  // llvm::outs() << "memref arguments: \n";
+  // for (auto i : memrefArgs) {
+  //   llvm::outs() << i.first << ' ' << i.second << "\n";
+  // }
+  
   if (memrefArgs.empty())
     return success(); // nothing to do.
 
@@ -397,27 +402,47 @@ HandshakeLowerExtmemToHWPass::lowerExtmemToHW(handshake::FuncOp func) {
     unsigned i = it.first;
     auto arg = it.second;
     auto loc = arg.getLoc();
+    // llvm::outs() << "memref " << i << ' ' << arg << '\n';
+    // llvm::outs() << "arg num: " << dyn_cast<BlockArgument>(arg).getArgNumber() << '\n';
+    auto argIdx = dyn_cast<BlockArgument>(arg).getArgNumber();
     // Get the attached extmemory external module.
     auto extmemOp = cast<handshake::ExternalMemoryOp>(*arg.getUsers().begin());
     b.setInsertionPoint(extmemOp);
+    // llvm::outs() << "extmem op: " << extmemOp << '\n';
 
     // Add memory input - this is the output of the extmemory op.
     auto memIOTypes = getMemTypeForExtmem(arg);
     MemRefType memrefType = cast<MemRefType>(arg.getType());
+    // llvm::outs() << "memIOTypes: \n";
+    // for (auto i : memIOTypes.inputTypes) {
+    //   llvm::outs() << "   " << i.first << ' ' << i.second << '\n';
+    // }
+    // for (auto i : memIOTypes.outputTypes) {
+    //   llvm::outs() << "   " << i.first << ' ' << i.second << '\n';
+    // }
+    // llvm::outs() << "    " << memIOTypes.memRefType << '\n';
+    // llvm::outs() << "    " << memIOTypes.loadPorts << '\n';
+    // llvm::outs() << "    " << memIOTypes.storePorts << '\n';
 
     auto oldReturnOp =
         cast<handshake::ReturnOp>(func.getBody().front().getTerminator());
     llvm::SmallVector<Value> newReturnOperands = oldReturnOp.getOperands();
+    // llvm::outs() << "existing return op and operands: " << oldReturnOp << '\n';
+    // for (auto i : newReturnOperands) {
+    //   llvm::outs() << "   " << i << "\n";
+    // }
     unsigned addedInPorts = 0;
-    auto memName = func.getArgName(i);
+    auto memName = func.getArgName(argIdx);
     auto addArgRes = [&](unsigned id, NamedType &argType, NamedType &resType) {
       // Function argument
-      unsigned newArgIdx = i + addedInPorts;
+      unsigned newArgIdx = argIdx + addedInPorts;
+      // llvm::outs() << "addArgRes " << newArgIdx << '\n';
       func.insertArgument(newArgIdx, argType.second, {}, arg.getLoc());
       insertInStringArrayAttr(func, "argNames",
                               memName.str() + "_" + argType.first.str(),
                               newArgIdx);
       auto newInPort = func.getArgument(newArgIdx);
+      // llvm::outs() << "newInPort: " << newInPort << '\n';
       ++addedInPorts;
 
       // Function result.
@@ -428,23 +453,35 @@ HandshakeLowerExtmemToHWPass::lowerExtmemToHW(handshake::FuncOp func) {
     };
 
     // Plumb load ports.
+    // llvm::outs() << "handle load ports: \n";
     unsigned portIdx = 0;
     for (auto loadPort : extmemOp.getLoadPorts()) {
+    //   llvm::outs() << "    " << loadPort.index << '\n';
+    //   llvm::outs() << "    " << loadPort.addressIn << '\n';
+    //   llvm::outs() << "    " << loadPort.dataOut << '\n';
+    //   llvm::outs() << "    " << loadPort.doneOut << '\n';
       auto newInPort = addArgRes(loadPort.index, memIOTypes.inputTypes[portIdx],
                                  memIOTypes.outputTypes[portIdx]);
       newReturnOperands.push_back(
           plumbLoadPort(loc, b, loadPort, newInPort, memrefType));
+      // llvm::outs() << "    new return operand: " << newReturnOperands.back() << '\n';
       ++portIdx;
     }
 
     // Plumb store ports.
+    //llvm::outs() << "handle store ports: \n";
     for (auto storePort : extmemOp.getStorePorts()) {
+      // llvm::outs() << "    " << storePort.index << '\n';
+      // llvm::outs() << "    " << storePort.addressIn << '\n';
+      // llvm::outs() << "    " << storePort.dataIn << '\n';
+      // llvm::outs() << "    " << storePort.doneOut << '\n';
       auto newInPort =
           addArgRes(storePort.index, memIOTypes.inputTypes[portIdx],
                     memIOTypes.outputTypes[portIdx]);
       newReturnOperands.push_back(
           plumbStorePort(loc, b, storePort, newInPort,
                          memIOTypes.outputTypes[portIdx].second, memrefType));
+      // llvm::outs() << "    new return operand: " << newReturnOperands.back() << '\n';
       ++portIdx;
     }
 
@@ -460,8 +497,13 @@ HandshakeLowerExtmemToHWPass::lowerExtmemToHW(handshake::FuncOp func) {
 
     // Erase the original memref argument of the top-level i/o now that it's
     // use has been removed.
-    func.eraseArgument(i + addedInPorts);
-    eraseFromArrayAttr(func, "argNames", i + addedInPorts);
+    // llvm::outs() << "function arguments: \n";
+    // for (auto [i, arg] : llvm::enumerate(func.getArguments())) {
+    //   llvm::outs() << "    " << i << ' ' << arg << '\n';
+    // }
+    // llvm::outs() << "i: " << i << " addedInPorts: " << addedInPorts << '\n';
+    func.eraseArgument(argIdx + addedInPorts);
+    eraseFromArrayAttr(func, "argNames", argIdx + addedInPorts);
 
     argReplacements[i] = memIOTypes;
   }

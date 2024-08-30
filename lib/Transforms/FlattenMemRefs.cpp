@@ -154,6 +154,22 @@ struct AllocOpConversion : public OpConversionPattern<memref::AllocOp> {
   }
 };
 
+  struct AllocaOpConversion : public OpConversionPattern<memref::AllocaOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(memref::AllocaOp op, OpAdaptor /*adaptor*/,
+                  ConversionPatternRewriter &rewriter) const override {
+    MemRefType type = op.getType();
+    if (isUniDimensional(type) || !type.hasStaticShape())
+      return failure();
+    MemRefType newType = MemRefType::get(
+        SmallVector<int64_t>{type.getNumElements()}, type.getElementType());
+    rewriter.replaceOpWithNewOp<memref::AllocaOp>(op, newType);
+    return success();
+  }
+};
+
 // A generic pattern which will replace an op with a new op of the same type
 // but using the adaptor (type converted) operands.
 template <typename TOp>
@@ -314,7 +330,7 @@ public:
 
     RewritePatternSet patterns(ctx);
     SetVector<StringRef> rewrittenCallees;
-    patterns.add<LoadOpConversion, StoreOpConversion, AllocOpConversion,
+    patterns.add<LoadOpConversion, StoreOpConversion, AllocOpConversion, AllocaOpConversion,
                  OperandConversionPattern<func::ReturnOp>,
                  OperandConversionPattern<memref::DeallocOp>,
                  CondBranchOpConversion,
